@@ -250,6 +250,10 @@ class TableBlock:
             rows falling inside this block's band.
         columns: The block's column profiles ([D5] block-local 0-based index).
         read_plan: The block's read plan, or ``None`` until the aggregator runs.
+        subtotal_skip_labels: Labels of the excluded non-blank skip rows
+            (subtotal/total/low-density), keyed by 1-based sheet row, for the
+            aggregator's "no silent loss" note (issue #2); value ``None`` when
+            the excluded row has no leading string label.
     """
 
     block_index: int
@@ -265,6 +269,11 @@ class TableBlock:
     skip_rows: list[int]
     columns: list[ColumnProfile]
     read_plan: ReadPlan | None
+    #: Labels of the excluded *non-blank* skip rows (subtotal/total/low-density),
+    #: keyed by 1-based sheet row, for the aggregator's "no silent loss" note
+    #: (issue #2). Value is the row's raw leading label, or ``None`` when the
+    #: excluded row has no leading string label. Default empty.
+    subtotal_skip_labels: dict[int, str | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -304,6 +313,10 @@ class SheetProfile:
             semantics. When non-empty, the flat header/boundary/column fields
             mirror ``blocks[0]`` (the top-most table) and ``read_plan`` equals
             ``blocks[0].read_plan``.
+        subtotal_skip_labels: Labels of the excluded non-blank skip rows
+            (subtotal/total/low-density), keyed by 1-based sheet row, for the
+            aggregator's "no silent loss" note (issue #2). Mirrors ``blocks[0]``
+            for a multi-band sheet.
     """
 
     name: str
@@ -328,6 +341,10 @@ class SheetProfile:
     columns: list[ColumnProfile] = field(default_factory=list)
     read_plan: ReadPlan | None = None
     blocks: list[TableBlock] = field(default_factory=list)
+    #: Labels of the excluded *non-blank* skip rows (subtotal/total/low-density),
+    #: keyed by 1-based sheet row, for the aggregator's "no silent loss" note
+    #: (issue #2). Mirrors ``blocks[0]`` for a multi-band sheet. Default empty.
+    subtotal_skip_labels: dict[int, str | None] = field(default_factory=dict)
 
 
 @dataclass

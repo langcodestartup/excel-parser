@@ -245,6 +245,48 @@ def test_extract_headerless_override_notes_dtype_skip(fixture_path) -> None:
     )
 
 
+def test_extract_surfaces_excluded_subtotal_rows_in_notes(fixture_path) -> None:
+    """Issue #2: excluded subtotal/total rows must surface in notes (No silent loss).
+
+    offset_plus_subtotals drops subtotal rows 8 & 12 ('소계') and the grand-total
+    row 13 ('합계') from the loaded frame (boundary detector ``skip_rows``). spec
+    §8 forbids losing them silently, so each exclusion is recorded — with its
+    1-based sheet row and label — on the table's ``notes`` and surfaces through
+    the serialized JSON contract too.
+    """
+    wr = extract(fixture_path("offset_plus_subtotals"))
+    (table,) = wr.tables
+    assert "excluded subtotal/separator row at sheet row 8 (소계)" in table.notes
+    assert "excluded subtotal/separator row at sheet row 12 (소계)" in table.notes
+    assert "excluded subtotal/separator row at sheet row 13 (합계)" in table.notes
+    parsed = json.loads(wr.to_json())
+    notes = parsed["sheets"][0]["tables"][0]["notes"]
+    assert "excluded subtotal/separator row at sheet row 8 (소계)" in notes
+
+
+def test_extract_skip_rows_remove_clears_excluded_note(fixture_path) -> None:
+    """[D2] × issue #2: keeping a subtotal via skip_rows_remove drops its note.
+
+    ``skip_rows_remove=[8]`` re-includes subtotal row 8 in the loaded frame, so
+    it is no longer excluded — its exclusion note must disappear while the still
+    -dropped rows 12/13 keep theirs. (The note iterates the *post-override*
+    interior skips, so the override is honored automatically.)
+    """
+    from excel_inspector import InspectionOptions, SheetOverride
+    opts = InspectionOptions(
+        sheet_overrides={"Sheet1": SheetOverride(header_row=4, skip_rows_remove=[8])}
+    )
+    wr = extract(fixture_path("offset_plus_subtotals"), options=opts)
+    (table,) = wr.tables
+    assert "excluded subtotal/separator row at sheet row 8 (소계)" not in table.notes
+    assert "excluded subtotal/separator row at sheet row 12 (소계)" in table.notes
+    assert "excluded subtotal/separator row at sheet row 13 (합계)" in table.notes
+    # The kept subtotal row really is back in the loaded data.
+    assert table.dataframe.astype(str).apply(
+        lambda c: c.str.contains("소계")
+    ).any().any()
+
+
 def test_extract_json_is_deterministic(fixture_path) -> None:
     p = fixture_path("offset_plus_subtotals")
     assert extract(p).to_json() == extract(p).to_json()

@@ -265,8 +265,9 @@ def build_read_plan(
     # Only genuine *interior* skips (strictly below the header and within the
     # data region) are honored; a stray skip at/above the header or above the
     # data start would otherwise corrupt the post-skip header normalization
-    # (issue #9).
-    for one_based in _interior_skip_rows(profile, warnings):
+    # (issue #9). The same filtered list feeds the no-silent-loss notes below.
+    interior_skips = _interior_skip_rows(profile, warnings)
+    for one_based in interior_skips:
         zero_based = to_zero_based(one_based)
         if zero_based not in skiprows:
             skiprows.append(zero_based)
@@ -282,9 +283,11 @@ def build_read_plan(
 
     # notes: body-merge forward-fill recommendations from the Merge Analyzer
     # (spec §4.4) plus as_formula advisories from the Formula Detector
-    # (plan v2 Phase 12). v1 records the recommendations only; acting on them
-    # is the loader's/caller's job.
+    # (plan v2 Phase 12), then the excluded subtotal/separator rows so a
+    # dropped row never leaves the loaded frame silently (spec §8; issue #2).
+    # v1 records the recommendations only; acting on them is the loader's job.
     notes = _body_merge_notes(profile) + _formula_notes(profile)
+    notes.extend(_excluded_subtotal_notes(profile, interior_skips))
 
     # Headerless visibility (plan v2 Phase 13 Step 2, L6): with an explicit
     # headerless declaration there is no header anchor, so the Boundary
@@ -459,6 +462,61 @@ def _formula_notes(profile: SheetProfile) -> list[str]:
             f"inference skipped; re-read with openpyxl data_only=False to "
             f"obtain the formula strings (plan v2 Phase 12)"
         )
+    return notes
+
+
+#: Prefix of every excluded-subtotal-row note (issue #2; spec §8 "No silent
+#: loss"). Stable so tests and consumers can recognize the advisory without
+#: parsing the whole string.
+_EXCLUDED_ROW_NOTE_PREFIX = "excluded subtotal/separator row at sheet row "
+
+
+def _excluded_subtotal_notes(
+    profile: SheetProfile, interior_skips: list[int]
+) -> list[str]:
+    """Build "no silent loss" notes for excluded subtotal/separator rows (issue #2).
+
+    The Boundary Detector drops subtotal/total/low-density rows into
+    ``skip_rows`` (recording each one's label on
+    :attr:`SheetProfile.subtotal_skip_labels`), and the aggregator converts them
+    to ``ReadPlan.skiprows``/``nrows`` so they never reach the loaded frame.
+    spec §8 forbids losing them silently, so one note per excluded row is
+    recorded here — naming its 1-based sheet row and (when present) its label.
+
+    Only rows that (a) survived the interior-skip filter [D1] (so a row removed
+    via ``skip_rows_remove`` [D2] is correctly *not* reported — it is no longer
+    excluded) and (b) were heuristic *non-blank* skips (present in
+    ``subtotal_skip_labels``) get a note. A manually added skip
+    (``skip_rows_add`` [D2]) is the caller's explicit choice and an interior
+    blank separator carries no data — neither is in the labels map, so neither
+    produces noise.
+
+    The note format is::
+
+        "excluded subtotal/separator row at sheet row <N> (<label>)"
+
+    The ``(<label>)`` suffix is omitted when the excluded row has no leading
+    string label (a purely sparse low-density row).
+
+    Args:
+        profile: The sheet (or synthetic block) profile carrying
+            :attr:`SheetProfile.subtotal_skip_labels`.
+        interior_skips: The filtered interior skip rows (1-based, ascending) —
+            the same list folded into ``skiprows`` — so the notes match exactly
+            what was dropped, in deterministic row order.
+
+    Returns:
+        One note per excluded subtotal/separator row (empty when there are none).
+    """
+
+    labels = profile.subtotal_skip_labels
+    notes: list[str] = []
+    for one_based in interior_skips:
+        if one_based not in labels:
+            continue
+        label = labels[one_based]
+        suffix = f" ({label})" if label else ""
+        notes.append(f"{_EXCLUDED_ROW_NOTE_PREFIX}{one_based}{suffix}")
     return notes
 
 
@@ -660,6 +718,7 @@ def build_block_read_plan(
         data_right_col=block.data_right_col,
         skip_rows=list(block.skip_rows),
         columns=list(block.columns),
+        subtotal_skip_labels=dict(block.subtotal_skip_labels),
     )
     plan = build_read_plan(synthetic, None, warnings)
     plan.dtype_map.update(get_dtype_force(options, profile.name))
