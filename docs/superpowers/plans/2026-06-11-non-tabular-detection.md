@@ -46,8 +46,11 @@ MIN_TABULAR_POPULATED_COLS: int = 1
 #: When a sheet populates >= 2 columns but its sample cell density
 #: (filled / (populated_cols * populated_rows)) is below this, it is still
 #: treated as non-tabular (a multi-column but scattered cover). Calibrated
-#: against the fixture corpus: the lowest real-table density observed is 0.688
-#: (stacked_uneven_width), leaving a margin of 0.188 below this threshold.
+#: against the corpus: the lowest density among regression-pinned corpus tables
+#: is 0.688 (stacked_uneven_width); a lower 0.648 occurs in the demo-only sheet
+#: 지역별매출 (complex_demo.xlsx, not test-pinned), so the narrowest known margin
+#: above this threshold is 0.148. The ``sparse_real_table`` fixture (density
+#: 0.583) pins that margin in the test suite so the threshold cannot creep up.
 NON_TABULAR_DENSITY_THRESHOLD: float = 0.5
 ```
 
@@ -90,6 +93,15 @@ git commit -m "feat: 비표 판정용 휴리스틱 상수 추가 (#3)"
         "density=0.333 -> is_tabular_candidate expected False via the density "
         "rule (issue #3).",
     ),
+    "sparse_real_table": FixtureSpec(
+        "sparse_real_table.xlsx",
+        True,
+        "Genuine 4-column table with many missing cells: header row + 5 data "
+        "rows, populated_cols=4, populated_rows=6, filled=14, density=0.583 -> "
+        "ABOVE NON_TABULAR_DENSITY_THRESHOLD (0.5) so is_tabular_candidate "
+        "expected True. Pins the density-rule margin so the threshold cannot "
+        "be raised past 0.583 without a red test (issue #3).",
+    ),
 ```
 
 - [ ] **Step 2: builder 함수 추가**
@@ -129,6 +141,33 @@ def build_cover_sparse() -> bytes:
     ws["E4"] = "2026-03-31"
     ws["C6"] = "재무팀"
     return _save_bytes(wb)
+
+
+def build_sparse_real_table() -> bytes:
+    """Genuine 4-column table with many missing cells (issue #3, density rule).
+
+    Header + 5 data rows over columns A-D, with scattered blanks so
+    populated_cols=4, populated_rows=6, filled=14, density=14/24=0.583. Above
+    NON_TABULAR_DENSITY_THRESHOLD (0.5) -> expected tabular. Pins the density
+    margin: raising the threshold past 0.583 would wrongly skip this real table.
+    """
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    _write_rows(
+        ws,
+        1,
+        [
+            ["품목", "1월", "2월", "3월"],
+            ["연필", 100, None, None],
+            ["지우개", None, 50, None],
+            ["공책", None, None, 210],
+            ["펜", None, None, 90],
+            ["자", 30, None, None],
+        ],
+    )
+    return _save_bytes(wb)
 ```
 
 - [ ] **Step 3: `BUILDERS` 등록**
@@ -138,6 +177,7 @@ def build_cover_sparse() -> bytes:
 ```python
     "cover_offset": build_cover_offset,
     "cover_sparse": build_cover_sparse,
+    "sparse_real_table": build_sparse_real_table,
 ```
 
 - [ ] **Step 4: 코퍼스 재생성 + 지표 검증**
@@ -148,9 +188,10 @@ Run:
 import sys; sys.path.insert(0, "tests/fixtures")
 import generate, openpyxl
 paths = generate.generate_all("tests/fixtures")
-for fid in ("cover_offset", "cover_sparse"):
+for fid in ("cover_offset", "cover_sparse", "sparse_real_table"):
+    sheet = "Sheet1" if fid == "sparse_real_table" else "표지"
     wb = openpyxl.load_workbook(paths[fid], read_only=True, data_only=True)
-    ws = wb["표지"]
+    ws = wb[sheet]
     cols=set(); prows=0; filled=0
     for r in ws.iter_rows(min_row=1, max_row=20, values_only=True):
         rf=False
@@ -167,13 +208,14 @@ Expected:
 ```
 cover_offset pop_cols 1 pop_rows 3 filled 3 density 1.0 max_col 2
 cover_sparse pop_cols 3 pop_rows 3 filled 3 density 0.333 max_col 5
+sparse_real_table pop_cols 4 pop_rows 6 filled 14 density 0.583 max_col 4
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/fixtures/generate.py tests/fixtures/cover_offset.xlsx tests/fixtures/cover_sparse.xlsx
-git commit -m "test: 비표 회귀 fixture cover_offset/cover_sparse 추가 (#3)"
+git add tests/fixtures/generate.py tests/fixtures/cover_offset.xlsx tests/fixtures/cover_sparse.xlsx tests/fixtures/sparse_real_table.xlsx
+git commit -m "test: 비표 회귀 fixture cover_offset/cover_sparse/sparse_real_table 추가 (#3)"
 ```
 
 ---
@@ -186,10 +228,12 @@ git commit -m "test: 비표 회귀 fixture cover_offset/cover_sparse 추가 (#3)
 
 - [ ] **Step 1: 실패 테스트 작성**
 
-`tests/test_sheet_enumerator.py` 끝에 추가한다. (상단 import는 이미 `pytest`가 없으므로 파일 맨 위 import 블록에 `import pytest`를 추가하고, `make_context`는 이미 import되어 있다.)
+`tests/test_sheet_enumerator.py` 끝에 추가한다. (파일 맨 위 import 블록에 `import pytest`와 `from excel_inspector.exceptions import CorruptWorkbookError`를 추가하고, `make_context`는 이미 import되어 있다.)
 
 ```python
 import pytest
+
+from excel_inspector.exceptions import CorruptWorkbookError
 
 
 class _FakeWorksheet:
@@ -225,6 +269,11 @@ class _BoomLoader:
         raise RuntimeError("boom")
 
 
+class _CorruptLoader:
+    def data_workbook(self):
+        raise CorruptWorkbookError("boom")
+
+
 def test_offset_cover_is_non_tabular(fixture_path) -> None:
     """cover_offset: text in column B is one populated column -> non-tabular."""
 
@@ -247,14 +296,15 @@ def test_sparse_cover_is_non_tabular(fixture_path) -> None:
 @pytest.mark.parametrize(
     "fixture_id,sheet,expected",
     [
-        ("stacked_uneven_width", "Sheet1", True),  # lowest-density real table (0.688)
+        ("stacked_uneven_width", "Sheet1", True),  # corpus-floor density (0.688)
+        ("sparse_real_table", "Sheet1", True),  # sparse real table density 0.583 > 0.5
         ("no_header", "Sheet1", True),  # all-numeric real table (pop_cols=3)
         ("header_only", "Sheet1", True),  # header-only real table (pop_cols=3)
         ("hidden_sheet", "Hidden", True),  # 2-column table, high density
         ("mixed_sheets", "README", False),  # single sparse text column
         ("empty_sheet", "Sheet1", False),  # empty sheet
         ("cover_offset", "표지", False),  # issue #3: B-offset single column
-        ("cover_sparse", "표지", False),  # multi-column but sparse
+        ("cover_sparse", "표지", False),  # multi-column but sparse (density 0.333)
     ],
 )
 def test_tabular_classification(fixture_path, fixture_id, sheet, expected) -> None:
@@ -285,12 +335,52 @@ def test_sampling_failure_falls_back_with_warning() -> None:
     )
     assert result is False and prov == "heuristic"  # dims fallback: 1 not > 1
     assert any("sheet_enumerator" in w and "S" in w for w in ctx.warnings)
+
+
+def test_inspector_error_propagates_not_swallowed() -> None:
+    """Loader domain errors (corrupt/encrypted) must propagate, not be absorbed
+    into a warning + dims fallback (spec §6/§9; consistent with pipeline.py)."""
+
+    ctx = make_context(loader=_CorruptLoader())
+    with pytest.raises(CorruptWorkbookError):
+        SheetEnumerator()._is_tabular_candidate(ctx, "S", max_row=10, max_col=2)
+    assert ctx.warnings == []  # not downgraded to a warning
+
+
+def test_density_rule_counts_only_content_rows() -> None:
+    """density = filled/(populated_cols*populated_rows); a blank middle row is
+    NOT counted in populated_rows. Here pc=2, content_rows=2, filled=3 ->
+    0.75 >= 0.5 -> tabular (pins the populated_rows denominator term)."""
+
+    rows = [["a", "b"], [None, None], ["c", None]]
+    loader = _FakeLoader({"S": _FakeWorksheet(rows)})
+    ctx = make_context(loader=loader)
+    result, prov = SheetEnumerator()._is_tabular_candidate(
+        ctx, "S", max_row=3, max_col=2
+    )
+    assert result is True and prov == "heuristic"
+
+
+def test_density_rule_low_density_is_non_tabular() -> None:
+    """pc=3, content_rows=3, filled=3 -> 3/9=0.333 < 0.5 -> non-tabular
+    (exercises the density branch directly via the fake loader)."""
+
+    rows = [["a", None, None], [None, None, "b"], [None, "c", None]]
+    loader = _FakeLoader({"S": _FakeWorksheet(rows)})
+    ctx = make_context(loader=loader)
+    result, _ = SheetEnumerator()._is_tabular_candidate(
+        ctx, "S", max_row=3, max_col=3
+    )
+    assert result is False
 ```
 
 - [ ] **Step 2: 실패 확인**
 
 Run: `/Users/daniel/Documents/project/sk-ax/excel-parser/.venv/bin/python -m pytest tests/test_sheet_enumerator.py -q`
-Expected: FAIL — `test_offset_cover_is_non_tabular`, `test_sparse_cover_is_non_tabular`, `test_tabular_classification[cover_offset...]`/`[cover_sparse...]`, `test_empty_sample_falls_back_to_dimensions`, `test_sampling_failure_falls_back_with_warning` 가 실패(현재 코드는 셀 내용을 안 보고 `max_col>1`만 보므로 cover_*가 tabular로 분류됨; 헬퍼 미존재).
+Expected: FAIL — 다음이 실패한다(현재 코드는 셀 내용을 안 보고 `max_col>1`만 보므로 cover_*가 tabular로 분류되고, 폴백/예외/density 분기가 없음):
+`test_offset_cover_is_non_tabular`, `test_sparse_cover_is_non_tabular`, `test_tabular_classification[cover_offset...]`/`[cover_sparse...]`, `test_sampling_failure_falls_back_with_warning`(현재 코드는 loader를 안 건드려 warning 미기록), `test_inspector_error_propagates_not_swallowed`(현재 코드는 sampling 자체가 없어 raise 안 함), `test_density_rule_low_density_is_non_tabular`(현재 코드는 density 분기 없음 → max_col 3>1로 True 반환).
+
+> 주의: `test_empty_sample_falls_back_to_dimensions`(입력 max_col=3)와 `test_density_rule_counts_only_content_rows`(max_col=2, 결과 True)는 레거시 `max_col>1` 규칙에서도 통과하므로 red가 아니라 **그대로 PASS**한다. 이들은 신 로직의 빈-샘플 폴백/density 경계 분기를 보증하는 green 가드다(회귀 시 red).
 
 - [ ] **Step 3: 헬퍼 + 판정 교체 구현**
 
@@ -299,6 +389,7 @@ Expected: FAIL — `test_offset_cover_is_non_tabular`, `test_sparse_cover_is_non
 (a) import 블록(라인 20 부근, `from ..options import get_is_tabular_override` 뒤)에 추가:
 
 ```python
+from ..exceptions import InspectorError
 from ..heuristics import (
     MIN_TABULAR_POPULATED_COLS,
     NON_TABULAR_DENSITY_THRESHOLD,
@@ -345,8 +436,10 @@ def _is_non_empty(value: object) -> bool:
           :data:`~excel_inspector.heuristics.NON_TABULAR_DENSITY_THRESHOLD`
           -> non-tabular (a scattered multi-column cover).
 
-        A sampling failure is absorbed (spec §6): the legacy dimension rule is
-        used and a warning is recorded so enumeration never breaks.
+        Robustness (spec §6): a loader domain error (:class:`InspectorError` —
+        corrupt/encrypted) propagates so the pipeline aborts (consistent with
+        ``pipeline.py``); any other sampling failure falls back to the legacy
+        dimension rule with a warning so enumeration never breaks.
 
         Returns:
             ``(is_tabular_candidate, provenance)`` where provenance is
@@ -361,6 +454,10 @@ def _is_non_empty(value: object) -> bool:
             populated_cols, populated_rows, filled = self._sample_density(
                 context, sheet_name
             )
+        except InspectorError:
+            # Loader domain errors (corrupt/encrypted) are NOT absorbed: they
+            # must abort the pipeline (spec §6/§9, like pipeline.py).
+            raise
         except Exception as exc:  # noqa: BLE001 - robustness policy (spec §6)
             context.add_warning(
                 f"sheet_enumerator: tabular sampling failed for sheet "
@@ -402,7 +499,9 @@ def _is_non_empty(value: object) -> bool:
         ``filled`` the total non-empty cell count.
 
         Raises:
-            Exception: Propagated to the caller, which absorbs it per spec §6.
+            InspectorError: A loader domain error; the caller re-raises it.
+            Exception: Any other sampling failure; the caller absorbs it into a
+                warning and falls back (spec §6).
         """
 
         loader = context.loader

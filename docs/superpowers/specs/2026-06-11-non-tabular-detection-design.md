@@ -71,7 +71,10 @@ return max_col > _MAX_NON_TABULAR_COLS, "heuristic"   # _MAX_NON_TABULAR_COLS = 
 3. `pop_cols <= MIN_TABULAR_POPULATED_COLS` (=1) → **비표**. (이슈의 B열 표지 + 기존 A열 표지를 모두 커버)
 4. `pop_cols >= 2` 이고 `density < NON_TABULAR_DENSITY_THRESHOLD` (=0.5) → **비표**. (흩어진 다중 열 표지)
 5. 그 외 → **표**.
-6. 샘플링 중 예외 발생 시 → 레거시 dims 규칙 + `context.add_warning(...)`. `sheet_enumerator`는 절대 전체 열거를 깨지 않는다(spec §6 견고성).
+6. 샘플링 중 예외 처리(spec §6 견고성):
+   - **loader 도메인 예외(`InspectorError` = corrupt/encrypted)는 흡수하지 않고 그대로 전파**한다 — 파이프라인 전체가 중단돼야 한다(pipeline.py의 정책과 일치, CLAUDE.md "only `InspectorError` subclasses propagate"). 흡수해서 dims 폴백으로 진행하면 손상/암호화 워크북을 조용히 삼키게 된다.
+   - 그 외 일반 예외(iteration 오류 등)만 → 레거시 dims 규칙 + `context.add_warning(...)`. `sheet_enumerator`는 이런 예외로 전체 열거를 깨지 않는다.
+   - (이 변경으로 `sheet_enumerator`가 try 블록 안에서 data 모드 핸들을 처음 여는 스테이지가 되므로, `InspectorError`만 우선 re-raise해 기존 전파 계약을 유지한다.)
 
 `provenance`는 휴리스틱 결정에 대해 기존대로 `"heuristic"`을 유지한다. 메서드 시그니처는 이미 `context`를 받으므로 외부 시그니처 변경은 없다(내부에서 loader 사용).
 
@@ -92,24 +95,27 @@ NON_TABULAR_DENSITY_THRESHOLD: float = 0.5
 
 ## 4. 실증 근거 (임계값 보정)
 
-전체 fixture에 대해 상단 20행 기준으로 지표를 계산한 결과:
+보정 스윕 범위 = **재생성 코퍼스(`generate.py`의 `FIXTURES`)** + **(참고) 데모 `complex_demo.xlsx`**. 후자는 `build_complex_demo.py`가 별도 생성하며 `fixture_corpus`가 재생성하지 않고 이를 검증하는 테스트도 없다(= 비회귀, 골든 미고정). 상단 20행 기준 측정 결과:
 
-| 분류 | 시트 | pop_cols | density |
-|---|---|---|---|
-| 비표(SKIP 돼야 함) | empty_sheet | 0 | 0.0 |
-| | mixed_sheets `README` | **1** | 1.0 |
-| | complex_demo `표지` (버그) | **1** | 1.0 |
-| 표(유지돼야 함) | 최소 pop_cols (원본 / Hidden / VeryHidden) | **2** | 1.0 |
-| | 최소 density (지역별매출) | 6 | **0.648** |
+| 분류 | 시트 | 출처 | pop_cols | density |
+|---|---|---|---|---|
+| 비표(SKIP 돼야 함) | empty_sheet | 코퍼스 | 0 | 0.0 |
+| | mixed_sheets `README` | 코퍼스 | **1** | 1.0 |
+| | complex_demo `표지` (버그) | 데모 | **1** | 1.0 |
+| 표(유지돼야 함) | 최소 pop_cols (Hidden / VeryHidden) | 코퍼스 | **2** | 1.0 |
+| | 코퍼스 최저 density (stacked_uneven_width) | 코퍼스 | 8 | **0.688** |
+| | 전역 최저 density (지역별매출) | 데모(비회귀) | 6 | **0.648** |
 
-- 모든 비표 시트는 `pop_cols <= 1`, 모든 진짜 표는 `pop_cols >= 2`. → 규칙 3만으로 현재 코퍼스가 100% 분리된다.
-- 진짜 표의 density 최저는 0.648 → 임계 0.5와 마진 0.148. density 규칙(규칙 4)은 코퍼스에 없는 "다중 열 흩어진 표지"용 안전망이며, 진짜 표를 오분류하지 않는다.
+- 모든 비표 시트는 `pop_cols <= 1`, 모든 진짜 표는 `pop_cols >= 2`. → 규칙 3만으로 현재 코퍼스가 100% 분리되며, density 규칙(규칙 4)은 코퍼스엔 아직 없는 "다중 열 흩어진 표지"용 안전망이다.
+- 진짜 표 density 최저값: **코퍼스 기준 0.688**(stacked_uneven_width, 회귀로 고정됨), **데모 포함 전역 기준 0.648**(complex_demo 지역별매출, 테스트 미고정). 임계 0.5와의 마진은 알려진 진짜 최저(0.648)를 기준으로 **0.148**이다 — 코드/문서는 0.688(마진 0.188)이 아니라 이 0.148을 알려진 헤드룸으로 인용한다.
+- **마진을 코드로 고정**(데모 의존 제거): 저밀도 진짜 표 fixture `sparse_real_table`(density 0.583)을 코퍼스에 추가하고 분류 테스트에서 `tabular=True`로 핀한다. 이로써 임계값은 cover_sparse(0.333, 비표)와 sparse_real_table(0.583, 표) 사이 `(0.333, 0.583]` 구간에 회귀로 묶여, 추후 임계를 0.583 위로 잘못 올리면 테스트가 red로 잡는다.
 
 ## 5. 테스트 계획
 
 ### 신규 fixture (`tests/fixtures/generate.py`에 추가; 절대 수기 편집 금지)
 - `cover_offset.xlsx` — 텍스트가 B열에서 시작하는 단일 열 표지(이슈 재현 자체). 기대: `pop_cols=1` → SKIP. (규칙 3)
-- `cover_sparse.xlsx` — 다중 열이지만 흩어진 표지. density ≈ 0.25~0.33이 되도록 설계(임계 0.5보다 충분히 낮게). 기대: SKIP. (규칙 4)
+- `cover_sparse.xlsx` — 다중 열이지만 흩어진 표지(`pop_cols=3, density≈0.333`, 임계 0.5보다 충분히 낮게). 기대: SKIP. (규칙 4 하한)
+- `sparse_real_table.xlsx` — 결측 많은 진짜 4열 표(`pop_cols=4, density≈0.583`, 임계 0.5 바로 위). 기대: 표 유지. (규칙 4 상한 — 임계 마진을 코드로 고정)
 
 ### 단위 테스트 (`make_context`/`make_sheet_profile` 합성)
 - 규칙 2~6 각각을 직접 검증: pop_cols=0 폴백, pop_cols=1 비표, 저밀도 비표, 정상 표 유지, 오버라이드 우선, 샘플 예외 시 폴백+warning.
