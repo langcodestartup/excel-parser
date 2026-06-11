@@ -1,0 +1,5 @@
+openpyxl==3.1.5
+pandas==3.0.3
+pytest==9.0.3
+# Test-only: generates the genuine password-protected fixture (encrypted.xlsx).
+msoffcrypto-tool==6.0.0

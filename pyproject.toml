@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excel-inspector"
+version = "0.1.0"
+description = "Excel Structure Inspector — read-only inspection of .xlsx workbooks producing a pandas-consumable ReadPlan."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "Proprietary" }
+authors = [{ name = "SK-AX Excel Parser Team" }]
+dependencies = [
+    "openpyxl==3.1.5",
+    "pandas==3.0.3",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.0.3", "msoffcrypto-tool==6.0.0"]
+
+[tool.setuptools.packages.find]
+include = ["excel_inspector*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The 100k-row perf smoke (plan v2 Phase 13 Step 4) adds ~14s (build +
+# tracemalloc-instrumented inspect) to a ~7s suite, so the default run
+# deselects it to keep the dev loop fast. Run it with `pytest -m slow`,
+# or everything with `pytest -m "slow or not slow"`.
+addopts = "-ra -m 'not slow'"
+markers = [
+    "slow: perf smoke that builds and inspects a 100k-row workbook (deselected by default; run with -m slow)",
+]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
