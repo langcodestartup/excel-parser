@@ -321,8 +321,17 @@ class TypeProfiler(Analyzer):
         sample_rows = self._sampled_row_numbers(  # 1-based, sorted
             data_start_row, data_end_row, skip_rows, row_window
         )
-        header_values, sampled = self._read_sample(
-            context, profile, header_row, sample_rows
+        # A vertical header merge bridges its anchor value into the leaf-row
+        # name: the leaf cell is an empty covered continuation, so the raw
+        # header value lives in the anchor cell one or more rows up (issue #1,
+        # spec §4.4). Horizontal group merges never bridge (their label belongs
+        # to ``resolved_name``, not the raw inspection ``name``).
+        header_anchors = self._vertical_header_anchors(
+            context, profile, header_row
+        )
+        header_values, sampled, anchor_values = self._read_sample(
+            context, profile, header_row, sample_rows,
+            set(header_anchors.values()),
         )
         sample_row_count = len(sampled)
         if sample_row_count == 0 and not header_values:
@@ -343,6 +352,13 @@ class TypeProfiler(Analyzer):
             inferred = _classify_column(values, sample_row_count)
             null_ratio = self._null_ratio(values, sample_row_count)
             name = self._header_name(header_values, cell_index)
+            if name is None and sheet_col in header_anchors:
+                # Empty leaf cell covered by a vertical header merge -> take the
+                # anchor cell's value (same column, one or more rows up).
+                anchor_row = header_anchors[sheet_col]
+                name = self._header_name(
+                    anchor_values.get(anchor_row, []), cell_index
+                )
             columns.append(
                 ColumnProfile(
                     index=table_index,
@@ -402,6 +418,57 @@ class TypeProfiler(Analyzer):
             stripped = value.strip()
             return stripped or None
         return str(value)
+
+    @staticmethod
+    def _vertical_header_anchors(
+        context: InspectionContext,
+        profile: SheetProfile,
+        header_row: int | None,
+    ) -> dict[int, int]:
+        """Map a 1-based column to the anchor row of a bridging vertical merge.
+
+        Issue #1: a header merge that spans **vertically** down onto the leaf
+        ``header_row`` leaves that row's cell empty (an openpyxl covered
+        continuation), so the column's raw header value really lives in the
+        merge anchor one or more rows up. Such a merge bridges column ``c``
+        when its anchor column is ``c`` (``min_col == c``) and its row span
+        reaches the leaf header from strictly above::
+
+            min_row < header_row <= max_row
+
+        ``min_row == header_row`` (anchor already on the leaf row, value reads
+        directly) and merges not reaching the leaf row (e.g. a horizontal group
+        header one row up over a present leaf cell) are excluded — only the
+        anchor *column* is filled, so a horizontal group label never leaks into
+        a different column's raw ``name`` (that flattening is ``resolved_name``
+        territory; ``test_merged_header_columns_profiled`` pins the contrast).
+
+        The unclassified spans come from the :class:`MergeScanner` via
+        ``context.merge_spans`` (populated before the Type Profiler runs); a
+        sheet absent from the map (scanner unavailable, spec §6) simply yields
+        no anchors and the v1 ``None`` name survives.
+
+        Args:
+            context: Shared context carrying the collected ``merge_spans``.
+            profile: The sheet being profiled (its name keys ``merge_spans``).
+            header_row: The block's 1-based leaf header row, or ``None``
+                (headerless -> no bridge).
+
+        Returns:
+            ``{column_1based: anchor_row_1based}``; empty when nothing bridges.
+            On the (degenerate) chance of several vertical merges anchoring the
+            same column, the lowest anchor (closest above the leaf) wins.
+        """
+
+        if header_row is None:
+            return {}
+        anchors: dict[int, int] = {}
+        for span in context.merge_spans.get(profile.name, []):
+            if span.min_row < header_row <= span.max_row:
+                existing = anchors.get(span.min_col)
+                if existing is None or span.min_row > existing:
+                    anchors[span.min_col] = span.min_row
+        return anchors
 
     @staticmethod
     def _sampled_row_numbers(
@@ -486,16 +553,18 @@ class TypeProfiler(Analyzer):
         profile: SheetProfile,
         header_row: int | None,
         sample_rows: list[int],
-    ) -> tuple[list[object], list[list[object]]]:
+        anchor_rows: set[int] | None = None,
+    ) -> tuple[list[object], list[list[object]], dict[int, list[object]]]:
         """Stream only the header row and the sampled data rows in data mode [D3].
 
         A single forward streaming pass is made over the worksheet, but only the
-        header row (when present) and the rows whose 1-based number is in
-        ``sample_rows`` are retained; every other row is read past and dropped.
-        The pass stops as soon as both the header and all sampled rows have been
-        collected, so a large table costs at most ``TYPE_SAMPLE_ROWS`` (+1)
-        retained rows and never the whole sheet (spec §8; no full
-        materialization) [D3].
+        header row (when present), the rows whose 1-based number is in
+        ``sample_rows``, and any vertical-merge ``anchor_rows`` (issue #1) are
+        retained; every other row is read past and dropped. The pass stops as
+        soon as everything needed has been collected, so a large table costs at
+        most ``TYPE_SAMPLE_ROWS`` (+1) retained data rows plus a handful of
+        header-anchor rows (all at or above the header) and never the whole
+        sheet (spec §8; no full materialization) [D3].
 
         Args:
             context: Shared context with a ready data-mode loader.
@@ -505,30 +574,39 @@ class TypeProfiler(Analyzer):
                 (plan v2 Task 10.2 Step 1).
             sample_rows: Sorted 1-based data-row numbers to retain (from
                 :meth:`_sampled_row_numbers`).
+            anchor_rows: 1-based rows of vertical-merge header anchors to retain
+                for the merged-header name bridge (issue #1); always at or above
+                ``header_row`` and so already within the streamed prefix.
 
         Returns:
-            ``(header_values, sampled_rows)`` where ``header_values`` is the
-            header row's values (``[]`` for a headerless sheet) and
-            ``sampled_rows`` are the retained data rows in ascending sheet order.
+            ``(header_values, sampled_rows, anchor_values)`` where
+            ``header_values`` is the header row's values (``[]`` for a headerless
+            sheet), ``sampled_rows`` are the retained data rows in ascending
+            sheet order, and ``anchor_values`` maps each retained anchor row's
+            1-based number to its values (``{}`` when no anchors are requested).
         """
 
+        anchor_rows = anchor_rows or set()
         workbook = context.loader.data_workbook()
         try:
             worksheet = workbook[profile.name]
         except KeyError:  # pragma: no cover - defensive
-            return [], []
+            return [], [], {}
 
         wanted = set(sample_rows)
         # The last row we need to touch; once past it we can stop streaming.
         last_needed = max(
-            [r for r in sample_rows] + ([header_row] if header_row else []),
+            [r for r in sample_rows]
+            + ([header_row] if header_row else [])
+            + list(anchor_rows),
             default=0,
         )
         if last_needed <= 0:
-            return [], []
+            return [], [], {}
 
         header_values: list[object] = []
         sampled: list[list[object]] = []
+        anchor_values: dict[int, list[object]] = {}
         for one_based, row in enumerate(
             worksheet.iter_rows(
                 min_row=1, max_row=last_needed, values_only=True
@@ -539,6 +617,8 @@ class TypeProfiler(Analyzer):
                 header_values = list(row)
             if one_based in wanted:
                 sampled.append(list(row))
+            if one_based in anchor_rows:
+                anchor_values[one_based] = list(row)
             if one_based >= last_needed:
                 break
-        return header_values, sampled
+        return header_values, sampled, anchor_values

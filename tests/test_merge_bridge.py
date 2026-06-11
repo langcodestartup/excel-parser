@@ -31,6 +31,8 @@ Coordinates in assertions are openpyxl 1-based for ``SheetProfile`` /
 
 from __future__ import annotations
 
+from openpyxl import Workbook
+
 from excel_inspector import (
     MergeAnalyzer,
     MergeScanner,
@@ -99,6 +101,40 @@ def test_merged_header_columns_profiled(fixture_path) -> None:
         (0, "이름", "text"),
         (1, None, "text"),
         (2, "점수", "number"),
+    ]
+
+
+def test_vertical_merge_header_name_bridged_to_anchor(tmp_path) -> None:
+    """Issue #1: a vertical-merge header carries its anchor value in ``name``.
+
+    The leaf header row's covered cell (``A2`` under the ``A1:A2`` merge) is
+    empty in data mode, so the inspection-time ``ColumnProfile.name`` came back
+    ``None`` even though the merge anchor one row up holds the real header text
+    (``구분``). The anchor value must bridge into ``name`` (Option A) — while
+    the horizontally-grouped leaf columns keep their own leaf-row names
+    (``수량``/``금액``); the group label ``실적`` belongs to ``resolved_name``,
+    never to the raw inspection ``name``.
+    """
+
+    wb = Workbook()
+    s = wb.active
+    s.title = "S"
+    s["A1"] = "구분"
+    s.merge_cells("A1:A2")  # vertical header merge -> anchor above the leaf row
+    s["B1"] = "실적"
+    s.merge_cells("B1:C1")  # horizontal group header (must NOT bridge into name)
+    s["B2"], s["C2"] = "수량", "금액"
+    s["A3"], s["B3"], s["C3"] = "서울", 10, 100
+    s["A4"], s["B4"], s["C4"] = "부산", 20, 200
+    path = tmp_path / "vmerge.xlsx"
+    wb.save(path)
+
+    sheet = inspect(str(path)).sheets[0]
+    assert sheet.header_row == 2  # leaf row of the two-level header band
+    assert [(c.index, c.name) for c in sheet.columns] == [
+        (0, "구분"),  # bridged from the A1:A2 anchor (was None -> issue #1)
+        (1, "수량"),  # leaf value; the group label '실적' lives in resolved_name
+        (2, "금액"),
     ]
 
 
