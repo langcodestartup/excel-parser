@@ -232,6 +232,30 @@ FIXTURES: dict[str, FixtureSpec] = {
         "is_tabular_candidate expected False). Sheet 'Data' is a normal "
         "table: header row 1 (A1:C1), data rows 2-5, columns A-C.",
     ),
+    "cover_offset": FixtureSpec(
+        "cover_offset.xlsx",
+        True,
+        "Single-sheet cover '표지' whose sparse text starts in column B "
+        "(B2/B4/B6). max_col=2 fooled the legacy max_col>1 gate, but only one "
+        "column is populated -> is_tabular_candidate expected False (issue #3).",
+    ),
+    "cover_sparse": FixtureSpec(
+        "cover_sparse.xlsx",
+        True,
+        "Single-sheet cover '표지' with scattered cells across 3 columns "
+        "(B2/E4/C6): populated_cols=3, populated_rows=3, filled=3, "
+        "density=0.333 -> is_tabular_candidate expected False via the density "
+        "rule (issue #3).",
+    ),
+    "sparse_real_table": FixtureSpec(
+        "sparse_real_table.xlsx",
+        True,
+        "Genuine 4-column table with many missing cells: header row + 5 data "
+        "rows, populated_cols=4, populated_rows=6, filled=14, density=0.583 -> "
+        "ABOVE NON_TABULAR_DENSITY_THRESHOLD (0.5) so is_tabular_candidate "
+        "expected True. Pins the density-rule margin so the threshold cannot "
+        "be raised past 0.583 without a red test (issue #3).",
+    ),
     "hidden_sheet": FixtureSpec(
         "hidden_sheet.xlsx",
         True,
@@ -850,6 +874,67 @@ def build_mixed_sheets() -> bytes:
     return _save_bytes(wb)
 
 
+def build_cover_offset() -> bytes:
+    """Cover sheet whose sparse text starts in column B (issue #3).
+
+    Reproduces the original bug: text offset to column B leaves max_col=2, so
+    the legacy ``max_col > 1`` gate misclassified it as tabular. Content-wise it
+    is a single populated column -> expected non-tabular.
+    """
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "표지"
+    ws["B2"] = "2026년 영업 보고서"
+    ws["B4"] = "작성: 영업팀"
+    ws["B6"] = "기밀 — 외부 배포 금지"
+    return _save_bytes(wb)
+
+
+def build_cover_sparse() -> bytes:
+    """Multi-column but scattered cover sheet (issue #3, density rule).
+
+    Three cells in three different columns and rows -> populated_cols=3,
+    populated_rows=3, filled=3, density=3/9=0.333. Above MIN_TABULAR_POPULATED_
+    COLS but below NON_TABULAR_DENSITY_THRESHOLD -> expected non-tabular.
+    """
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "표지"
+    ws["B2"] = "분기 실적 요약"
+    ws["E4"] = "2026-03-31"
+    ws["C6"] = "재무팀"
+    return _save_bytes(wb)
+
+
+def build_sparse_real_table() -> bytes:
+    """Genuine 4-column table with many missing cells (issue #3, density rule).
+
+    Header + 5 data rows over columns A-D, with scattered blanks so
+    populated_cols=4, populated_rows=6, filled=14, density=14/24=0.583. Above
+    NON_TABULAR_DENSITY_THRESHOLD (0.5) -> expected tabular. Pins the density
+    margin: raising the threshold past 0.583 would wrongly skip this real table.
+    """
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    _write_rows(
+        ws,
+        1,
+        [
+            ["품목", "1월", "2월", "3월"],
+            ["연필", 100, None, None],
+            ["지우개", None, 50, None],
+            ["공책", None, None, 210],
+            ["펜", None, None, 90],
+            ["자", 30, None, None],
+        ],
+    )
+    return _save_bytes(wb)
+
+
 def build_hidden_sheet() -> bytes:
     """Visible + hidden + veryHidden sheets (see ``FIXTURES``).
 
@@ -1330,6 +1415,9 @@ BUILDERS: dict[str, Callable[[], bytes]] = {
     "left_margin_cols": build_left_margin_cols,
     "left_margin_with_subtotal": build_left_margin_with_subtotal,
     "mixed_sheets": build_mixed_sheets,
+    "cover_offset": build_cover_offset,
+    "cover_sparse": build_cover_sparse,
+    "sparse_real_table": build_sparse_real_table,
     "hidden_sheet": build_hidden_sheet,
     "blank_run_terminates": build_blank_run_terminates,
     "interior_blank": build_interior_blank,
