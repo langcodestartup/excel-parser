@@ -147,7 +147,12 @@ class ColumnProfile:
 
     Attributes:
         index: Column position, 0-based from the table top-left.
-        name: Column name, or ``None`` when unavailable.
+        name: The raw header cell value seen at inspection time, or ``None``
+            when unavailable. For a column whose leaf header cell is an empty
+            continuation of a **vertical** header merge, this is the merge
+            anchor's value (issue #1) — the real header text one or more rows
+            up; a horizontal group label, by contrast, stays out of ``name``
+            and surfaces only in the flattened :attr:`resolved_name`.
         inferred_type: One of ``"number"``, ``"text"``, ``"numeric_text"``,
             ``"date"``, ``"mixed"``. Defaults to the ``"unknown"`` sentinel
             until the Type Profiler (Phase 5) overwrites it; the aggregator
