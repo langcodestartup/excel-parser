@@ -120,6 +120,36 @@ def _is_empty(value: object) -> bool:
     return value is None or (isinstance(value, str) and value == "")
 
 
+def _leading_label_raw(row: list[object], left_col: int = 1) -> str | None:
+    """Return the row's leading (first non-empty) string label, original case.
+
+    Identical scan to :func:`_leading_label` — anchored at the table's 1-based
+    ``left_col``; only a *string* first-populated cell qualifies as a label (a
+    leading number/date or an empty span yields ``None``) — but **without**
+    lower-casing. Used to render the excluded subtotal/separator row's label in
+    the aggregator's "no silent loss" note (issue #2), where the original case
+    (e.g. ``"Total"``) must survive.
+
+    Args:
+        row: The sampled row values.
+        left_col: The table's 1-based left column boundary [D1]; cells to its
+            left (the sheet margin) are ignored. Defaults to 1 (whole row).
+
+    Returns:
+        The stripped leading label in its original case, or ``None`` when the
+        row has no leading string label.
+    """
+
+    for value in row[max(left_col, 1) - 1 :]:
+        if value is None or (isinstance(value, str) and value == ""):
+            continue
+        if isinstance(value, str):
+            return value.strip()
+        # First populated cell is non-string (number/date) -> not a label row.
+        return None
+    return None
+
+
 def _leading_label(row: list[object], left_col: int = 1) -> str | None:
     """Return the row's leading (first non-empty) label cell, stripped (§7.2).
 
@@ -145,14 +175,8 @@ def _leading_label(row: list[object], left_col: int = 1) -> str | None:
         leading string label.
     """
 
-    for value in row[max(left_col, 1) - 1 :]:
-        if value is None or (isinstance(value, str) and value == ""):
-            continue
-        if isinstance(value, str):
-            return value.strip().lower()
-        # First populated cell is non-string (number/date) -> not a label row.
-        return None
-    return None
+    raw = _leading_label_raw(row, left_col)
+    return raw.lower() if raw is not None else None
 
 
 def _matches_keyword(
@@ -425,6 +449,12 @@ class BlockBoundary:
     data_right_col: int | None = None
     skip_rows: list[int] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: Labels of the *non-blank* skip rows (subtotal/total/low-density), keyed
+    #: by 1-based sheet row, for the aggregator's "no silent loss" note (issue
+    #: #2). The value is the row's raw leading label, or ``None`` when the
+    #: excluded row has no leading string label (a purely sparse row). Interior
+    #: blank separator rows carry no data and are deliberately absent.
+    subtotal_skip_labels: dict[int, str | None] = field(default_factory=dict)
 
 
 class BoundaryDetector(Analyzer):
@@ -491,6 +521,7 @@ class BoundaryDetector(Analyzer):
         profile.skip_rows = self._apply_skip_overrides(
             context, profile, result.skip_rows
         )
+        profile.subtotal_skip_labels = dict(result.subtotal_skip_labels)
         for warning in result.warnings:
             context.add_warning(warning)
 
@@ -603,6 +634,10 @@ class BoundaryDetector(Analyzer):
         data_start: int | None = None
         data_end: int | None = None
         skip_rows: list[int] = []
+        # Labels of the non-blank (subtotal/total/low-density) skip rows, keyed
+        # by 1-based row, captured at the skip point so the aggregator can name
+        # each excluded row in its "no silent loss" note (issue #2).
+        subtotal_labels: dict[int, str | None] = {}
         blank_run = 0
         # Blank rows recorded for the *current* (not-yet-terminating) run; held
         # so they can be retracted if the run grows to a terminator (trailing,
@@ -668,6 +703,10 @@ class BoundaryDetector(Analyzer):
 
             if is_keyword or is_low_density:
                 skip_rows.append(one_based)
+                # Record the excluded row's label (original case) for the
+                # aggregator's no-silent-loss note (issue #2). A low-density row
+                # without a leading string label records None.
+                subtotal_labels[one_based] = _leading_label_raw(row, left_col)
                 non_blank_skip = True
                 continue
 
@@ -732,6 +771,15 @@ class BoundaryDetector(Analyzer):
         result.data_start_row = data_start
         result.data_end_row = data_end
         result.skip_rows = skip_rows
+        # Keep only labels of rows that survived as final skips (the
+        # unreliable-span fallback empties skip_rows; blank-row retraction
+        # removes blanks — never present here anyway). Iteration order follows
+        # ascending row order, so the aggregator's notes are deterministic.
+        result.subtotal_skip_labels = {
+            row: subtotal_labels[row]
+            for row in skip_rows
+            if row in subtotal_labels
+        }
         return result
 
     @staticmethod

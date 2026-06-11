@@ -387,6 +387,49 @@ def test_non_table_band_is_skipped_with_warning(tmp_path) -> None:
     assert wr.warnings
 
 
+def _write_stacked_lower_subtotal(path: Path) -> None:
+    """Two stacked tables; only the *lower* one (rows 6-9) ends in a 소계 row."""
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws.append(["이름", "점수", "등급"])     # row 1 (table 1 header)
+    ws.append(["가", 90, "A"])             # row 2
+    ws.append(["나", 80, "B"])             # row 3
+    # rows 4-5 blank (BLANK_RUN separator)
+    ws.cell(row=6, column=1, value="지역")  # table 2 header
+    ws.cell(row=6, column=2, value="수량")
+    ws.cell(row=6, column=3, value="금액")
+    ws.append(["서울", 10, 100])           # row 7 (auto-appends at row 7)
+    ws.append(["부산", 20, 200])           # row 8
+    ws.append(["소계", 30, 300])           # row 9 subtotal
+    wb.save(path)
+
+
+def test_excluded_subtotal_note_attributed_to_owning_block(tmp_path) -> None:
+    """Issue #2 × block path: the excluded subtotal note lands on its own table.
+
+    Only the lower stacked table (T2) ends in a '소계' row; its exclusion note
+    must appear on T2 with the *absolute* 1-based sheet row (9), while the
+    clean upper table (T1) stays note-free — no leakage across blocks.
+    """
+
+    path = tmp_path / "stacked_lower_subtotal.xlsx"
+    _write_stacked_lower_subtotal(path)
+
+    wr = extract(path)
+    t1, t2 = wr.tables
+    assert t1.table_id == "S!T1" and t2.table_id == "S!T2"
+    note = "excluded subtotal/separator row at sheet row 9 (소계)"
+    assert note in t2.notes
+    assert not any("row at sheet row" in n for n in t1.notes)
+    # The subtotal really was dropped from T2's loaded frame.
+    assert len(t2.dataframe) == 2
+    assert not t2.dataframe.astype(str).apply(
+        lambda c: c.str.contains("소계")
+    ).any().any()
+
+
 # ---------------------------------------------------------------------------
 # Guard 6 — deterministic warnings + JSON determinism
 # ---------------------------------------------------------------------------

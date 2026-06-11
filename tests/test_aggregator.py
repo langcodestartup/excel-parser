@@ -96,6 +96,46 @@ def test_interior_skip_rows_converted_to_zero_based() -> None:
     assert plan.header == 0
 
 
+def test_excluded_subtotal_notes_label_present_and_absent() -> None:
+    """Issue #2: one no-silent-loss note per excluded row, label optional.
+
+    A row with a recorded label renders ``(label)``; a low-density row without
+    a leading string label (value ``None``) renders the row number only. Notes
+    follow the ascending interior-skip order (deterministic).
+    """
+
+    from excel_inspector.aggregator import _excluded_subtotal_notes
+
+    profile = make_sheet_profile(
+        name="S", header_row=1, data_start_row=2, data_end_row=10,
+        skip_rows=[3, 6],
+    )
+    profile.subtotal_skip_labels = {3: "소계", 6: None}
+    assert _excluded_subtotal_notes(profile, [3, 6]) == [
+        "excluded subtotal/separator row at sheet row 3 (소계)",
+        "excluded subtotal/separator row at sheet row 6",
+    ]
+
+
+def test_excluded_subtotal_notes_only_for_reported_skips() -> None:
+    """A labelled row not in the (post-override) interior skips gets no note.
+
+    The note iterates the interior-skip list, not the label map, so a subtotal
+    re-included via ``skip_rows_remove`` [D2] — absent from the skip list —
+    leaves no stale exclusion note (issue #2 × override). Likewise a manual
+    ``skip_rows_add`` row (absent from the label map) produces no note.
+    """
+
+    from excel_inspector.aggregator import _excluded_subtotal_notes
+
+    profile = make_sheet_profile(name="S", header_row=1, data_start_row=2)
+    profile.subtotal_skip_labels = {8: "소계"}
+    # Row 8 has a label but is not among the reported interior skips -> no note.
+    assert _excluded_subtotal_notes(profile, [12]) == []
+    # Row 12 is a reported skip but carries no recorded label -> no note.
+    assert _excluded_subtotal_notes(profile, []) == []
+
+
 def test_nrows_is_full_inclusive_span() -> None:
     """nrows = full 1-based inclusive data span; interior skips NOT subtracted.
 

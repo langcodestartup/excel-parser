@@ -196,6 +196,7 @@ class BlockAnalyzer(Analyzer):
             skip_rows=list(profile.skip_rows),
             columns=list(profile.columns),
             read_plan=None,
+            subtotal_skip_labels=dict(profile.subtotal_skip_labels),
         )
 
     def _analyze_band(
@@ -330,6 +331,7 @@ class BlockAnalyzer(Analyzer):
             skip_rows=skip_rows,
             columns=columns,
             read_plan=None,
+            subtotal_skip_labels=dict(boundary.subtotal_skip_labels),
         )
 
     @staticmethod
@@ -419,3 +421,4 @@ class BlockAnalyzer(Analyzer):
         profile.data_right_col = block.data_right_col
         profile.skip_rows = list(block.skip_rows)
         profile.columns = list(block.columns)
+        profile.subtotal_skip_labels = dict(block.subtotal_skip_labels)

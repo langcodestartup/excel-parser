@@ -102,6 +102,21 @@ def test_offset_plus_subtotals_boundaries(fixture_path) -> None:
     assert sheet.data_right_col is None
 
 
+def test_offset_plus_subtotals_records_skip_labels(fixture_path) -> None:
+    """Issue #2: each excluded subtotal/total row's label is recorded (raw case).
+
+    The detector keys ``subtotal_skip_labels`` by 1-based sheet row so the
+    aggregator can name every dropped row in its "no silent loss" note. The
+    labels keep their original characters (here Korean '소계'/'합계'), and only
+    the non-blank skip rows are recorded.
+    """
+
+    sheet = _run_on(
+        fixture_path("offset_plus_subtotals")
+    ).workbook_profile.sheets[0]
+    assert sheet.subtotal_skip_labels == {8: "소계", 12: "소계", 13: "합계"}
+
+
 def test_blank_run_terminates_boundaries(fixture_path) -> None:
     """blank_run_terminates: a 2-row blank run ends the block (§7.2).
 
@@ -163,6 +178,9 @@ def test_left_margin_with_subtotal_keyword_anchors_at_left_col(
     assert sheet.data_start_row == 2
     assert sheet.data_end_row == 7
     assert sheet.skip_rows == [5]  # the '소계' row, caught from column C
+    # Issue #2: the recorded label is the table's own '소계' at C5, never the
+    # left-margin note at A5 — the no-silent-loss note anchors at data_left_col.
+    assert sheet.subtotal_skip_labels == {5: "소계"}
 
 
 def test_header_only_has_no_data_region(fixture_path) -> None:
