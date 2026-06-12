@@ -354,6 +354,42 @@ def test_non_contiguous_band_keeps_single_header_with_warning(
     assert "not contiguous" in warnings[0]
 
 
+def test_disconnected_title_merge_keeps_contiguous_band_with_warning(
+    sheet_profile_factory,
+) -> None:
+    """A merged title row above a gap no longer vetoes the band (issue #7).
+
+    Merged title row 1, blank row 2, group merges row 3, leaf header row 4:
+    the maximal contiguous run ending at the leaf (rows 3-4) still loads as
+    the multi-level band ``header=[2, 3]``; only the disconnected title row
+    is dropped from the band, with a visible warning (spec §8 no silent
+    loss) — NOT the previous all-or-nothing fallback to the bare leaf row
+    that broke the vertical-merge anchor names into ``Unnamed: N``.
+    """
+
+    profile = sheet_profile_factory(
+        max_row=6,
+        max_col=4,
+        header_row=4,
+        header_provenance="heuristic",
+        is_multi_level_header=True,
+        merges=[
+            MergeRegion(range="A1:D1", kind="header"),  # title banner, row 1
+            MergeRegion(range="A3:B3", kind="header"),
+            MergeRegion(range="C3:D3", kind="header"),
+        ],
+        data_start_row=5,
+        data_end_row=6,
+    )
+    warnings: list[str] = []
+    plan = build_read_plan(profile, None, warnings)
+    assert plan.header == [2, 3]
+    assert plan.skiprows == []
+    assert len(warnings) == 1
+    assert "excluded from the multi-level header" in warnings[0]
+    assert "[1]" in warnings[0]
+
+
 def test_usecols_conflict_keeps_single_header_with_warning(
     sheet_profile_factory,
 ) -> None:
@@ -589,6 +625,37 @@ def test_extract_multi_level_numeric_text_dtype_positional(
 
     records = json.loads(table.to_json())["records"]
     assert [r["기본 / 코드"] for r in records] == ["007", "012", "034"]
+
+
+def test_extract_titled_multi_level_records_keys_match_columns(
+    fixture_path,
+) -> None:
+    """[Issue #7 golden] a merged title banner does not break the band.
+
+    End-to-end through extract(): the disconnected title row is excluded
+    (with a visible warning) while rows 3-4 still load as the multi-level
+    band, so records keys carry the flattened names — vertical-merge anchors
+    included — and match ``columns[].resolved_name`` positionally. The
+    numeric_text column under the band keeps its leading zeros [D5].
+    """
+
+    wr = extract(fixture_path("titled_multi_level"))
+    (table,) = wr.tables
+    assert table.header_row == 4  # 1-based leaf header (inspection domain)
+
+    expected = [
+        "지역", "제품코드",
+        "1분기 / 1월", "1분기 / 2월", "1분기 / 3월",
+        "2분기 / 4월", "2분기 / 5월", "2분기 / 6월",
+    ]
+    d = table.to_dict()
+    assert [c["resolved_name"] for c in d["columns"]] == expected
+    assert list(d["records"][0].keys()) == expected
+    assert d["records"][0]["지역"] == "서울"
+    assert [r["제품코드"] for r in d["records"]] == ["00123", "00789"]
+    assert any(
+        "excluded from the multi-level header" in w for w in wr.warnings
+    )
 
 
 # ---------------------------------------------------------------------------

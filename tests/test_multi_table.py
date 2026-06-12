@@ -657,22 +657,64 @@ def test_manual_override_block_plan_clamped_to_band(fixture_path) -> None:
     assert list(t2.dataframe["제품명"]) == ["키보드", "마우스", "모니터"]
 
 
-def test_blank_run_terminates_noise_band_one_column_note(fixture_path) -> None:
-    """LOW #7/#9: the 1-column noise band T2 carries the verify advisory.
+def test_blank_run_terminates_noise_band_rejected(fixture_path) -> None:
+    """Issue #8 recalibration: the '기타 메모' noise band is judged not a table.
 
-    The '기타 메모' band (rows 9-10, FIXTURES) genuinely scores as a header
-    over a data row, so it stays extracted — but its band-local 1-column span
-    is flagged for human verification instead of passing as a silent table.
+    Pre-issue-#8, the stray-label band (rows 9-10, FIXTURES) crossed the 0.5
+    threshold only because its single-row lookahead window granted the full
+    type-consistency weight for free — the very bias issue #8 removes. With
+    the evidence factor the band scores below threshold and is rejected; the
+    judgment surfaces as a warning (spec §8, no silent loss) and the real
+    table is untouched.
     """
 
     wr = extract(fixture_path("blank_run_terminates"))
-    assert [t.table_id for t in wr.tables] == ["Sheet1!T1", "Sheet1!T2"]
-    t1, t2 = wr.tables
+    assert [t.table_id for t in wr.tables] == ["Sheet1!T1"]
+    (t1,) = wr.tables
+    assert t1.dataframe.shape == (4, 3)
+    assert not t1.notes                     # the real 3-column table is clean
+    assert any(
+        "rows 9-10" in w and "band judged not a table" in w
+        for w in wr.warnings
+    )
+
+
+def test_band_scoped_one_column_block_carries_verify_note() -> None:
+    """LOW #7: a band-scoped 1-column block keeps the verify advisory.
+
+    The corpus example (blank_run_terminates T2) is rejected since the issue
+    #8 recalibration, so the advisory contract is pinned at the plan level: a
+    band-scoped block whose span is one column wide gets the
+    human-verification note; the mirror path stays note-free (mirror-plan ==
+    flat-plan invariant).
+    """
+
+    from excel_inspector.aggregator import build_block_read_plan
+    from excel_inspector.models import TableBlock
+
+    from conftest import make_sheet_profile  # type: ignore[import-not-found]
+
+    profile = make_sheet_profile(name="S", max_row=10, max_col=3)
+    block = TableBlock(
+        block_index=1,
+        band_start_row=9,
+        band_end_row=10,
+        header_row=9,
+        header_confidence=0.6,
+        header_provenance="heuristic",
+        data_start_row=10,
+        data_end_row=10,
+        data_left_col=1,
+        data_right_col=1,                   # 1-column span
+        skip_rows=[],
+        columns=[],
+        read_plan=None,
+    )
     note = "1-column band — verify this is a real table"
-    assert t2.dataframe.shape == (1, 1)
-    assert list(t2.dataframe.columns) == ["기타 메모"]
-    assert note in t2.notes
-    assert note not in t1.notes             # the real 3-column table is clean
+    assert note in build_block_read_plan(profile, block, band_scoped=True).notes
+    assert note not in build_block_read_plan(
+        profile, block, band_scoped=False
+    ).notes
 
 
 def test_extracted_band_warning_wording(fixture_path) -> None:

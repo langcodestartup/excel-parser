@@ -7,8 +7,13 @@ analyzer reads only the top ``HEADER_SCAN_ROWS`` rows in **data mode**
 formula::
 
     score(r) = 0.5 * non_empty_string_ratio(r)
-             + 0.3 * type_consistency(rows r+1 .. r+5)
+             + 0.3 * type_consistency(rows r+1 .. r+5) * (n_below / 5)
              + 0.2 * distinctness(r vs rows r+1 .. r+5)
+
+where ``n_below`` is the number of rows actually observed in the lookahead
+window. The evidence factor (issue #8) keeps a bottom-of-sample candidate —
+whose 1-row window is trivially self-consistent — from outscoring the true
+header in small mixed-type tables.
 
 The highest-scoring row becomes ``header_row`` (1-based) with
 ``header_confidence = score`` and ``header_provenance = "heuristic"``. When the
@@ -233,10 +238,22 @@ def _score_row(
     candidate = rows[index]
     below = rows[index + 1 : index + 1 + HEADER_LOOKAHEAD_ROWS]
 
+    # Issue #8: scale the consistency term by the observed lookahead evidence
+    # (n_below / HEADER_LOOKAHEAD_ROWS). A shrunken window is trivially
+    # self-consistent — a single row below yields 1.0 per column — which
+    # handed bottom-of-sample data rows a free type-consistency win over the
+    # true header in small mixed-type tables (spec §7.1). Only consistency is
+    # scaled: with one below row it is vacuous (a lone cell is always its own
+    # dominant category), whereas distinctness still makes a real candidate-vs-
+    # below comparison from a single row, so it keeps its full weight as-is.
+    evidence = len(below) / HEADER_LOOKAHEAD_ROWS
+
     return (
         HEADER_WEIGHT_NON_EMPTY_STRING
         * _non_empty_string_ratio(candidate, col_count)
-        + HEADER_WEIGHT_TYPE_CONSISTENCY * _type_consistency(below, col_count)
+        + HEADER_WEIGHT_TYPE_CONSISTENCY
+        * _type_consistency(below, col_count)
+        * evidence
         + HEADER_WEIGHT_DISTINCTNESS
         * _distinctness(candidate, below, col_count)
     )

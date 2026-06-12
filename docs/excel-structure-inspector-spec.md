@@ -222,9 +222,13 @@
 
 ### 7.1 헤더 탐지 점수화
 - **표본**: 상단 `HEADER_SCAN_ROWS = 20`행.
-- **점수식**: `score(r) = 0.5·non_empty_string_ratio(r) + 0.3·type_consistency(rows r+1..r+5) + 0.2·distinctness(r vs r+1..r+5)`
+- **점수식**: `score(r) = 0.5·non_empty_string_ratio(r) + 0.3·type_consistency(rows r+1..r+5)·(n_below/5) + 0.2·distinctness(r vs r+1..r+5)`
   - `non_empty_string_ratio`: 행 내 비어있지 않은 **문자열** 셀 / 전체 사용 열 수.
   - `type_consistency`: 바로 아래 5개 행의 컬럼별 자료형 일관성 평균(0~1).
+  - `n_below`: lookahead 창에서 **실제 관측된** 아래 행 수(0~5). 증거 가중(issue #8):
+    창이 1행뿐이면 컬럼별 일관성이 자명하게 1.0이 되어 표본 하단의 데이터 행이
+    진짜 헤더를 이기는 편향이 생기므로, 일관성 항은 관측된 증거량에 비례해서만
+    인정한다.
   - `distinctness`: 헤더 후보 행과 아래 행들의 셀 길이·타입 패턴 차이(0~1).
 - **판정**: 최고점 행을 헤더로 추정, `header_confidence = score`. `score < 0.5`(임계값, `InspectionOptions`로 조정 가능)이면 `needs_manual_header=True`.
 

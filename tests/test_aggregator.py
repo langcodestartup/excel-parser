@@ -136,6 +136,124 @@ def test_excluded_subtotal_notes_only_for_reported_skips() -> None:
     assert _excluded_subtotal_notes(profile, []) == []
 
 
+# -- issue #8: rows absorbed above a heuristic header (spec §8) ------------
+
+
+def test_rows_above_header_note_in_plan() -> None:
+    """Issue #8: rows absorbed above a heuristic header surface as a note.
+
+    Rule 1 folds rows ``1 .. header_row-1`` into ``skiprows`` so they never
+    reach the loaded frame; spec §8 "no silent loss" demands the drop be
+    visible. When the band starts above the heuristically detected header,
+    the dropped row span is recorded on ``ReadPlan.notes``.
+    """
+
+    profile = make_sheet_profile(
+        name="S",
+        header_row=4,
+        header_provenance="heuristic",
+        data_start_row=5,
+        data_end_row=8,
+    )
+    plan = build_read_plan(profile, None, None, band_start_row=1)
+    assert (
+        "rows above detected header not loaded: sheet rows 1-3 "
+        "(header at row 4); use a header_row override if these are data rows"
+    ) in plan.notes
+    # The absorption itself is unchanged — the note only adds visibility.
+    assert plan.skiprows == [0, 1, 2]
+
+
+def test_rows_above_header_note_single_row() -> None:
+    """A single dropped row renders 'sheet row N' (not a span)."""
+
+    profile = make_sheet_profile(
+        name="S",
+        header_row=2,
+        header_provenance="heuristic",
+        data_start_row=3,
+        data_end_row=5,
+    )
+    plan = build_read_plan(profile, None, None, band_start_row=1)
+    assert (
+        "rows above detected header not loaded: sheet row 1 "
+        "(header at row 2); use a header_row override if these are data rows"
+    ) in plan.notes
+
+
+def test_rows_above_header_no_note_for_manual_header() -> None:
+    """A manual header_row override [D2] is the caller's explicit choice.
+
+    Mirrors the issue #2 precedent (manual ``skip_rows_add`` rows produce no
+    exclusion note): the caller already knows what sits above their chosen
+    header, so no noise is added.
+    """
+
+    profile = make_sheet_profile(
+        name="S",
+        header_row=4,
+        header_provenance="manual",
+        header_confidence=1.0,
+        data_start_row=5,
+        data_end_row=8,
+    )
+    plan = build_read_plan(profile, None, None, band_start_row=1)
+    assert not [
+        n for n in plan.notes if n.startswith("rows above detected header")
+    ]
+
+
+def test_rows_above_header_no_note_when_band_starts_at_header() -> None:
+    """Header at the band top -> nothing above it was dropped -> no note."""
+
+    profile = make_sheet_profile(
+        name="S",
+        header_row=4,
+        header_provenance="heuristic",
+        data_start_row=5,
+        data_end_row=8,
+    )
+    plan = build_read_plan(profile, None, None, band_start_row=4)
+    assert not [
+        n for n in plan.notes if n.startswith("rows above detected header")
+    ]
+
+
+def test_rows_above_header_no_note_without_band_geometry() -> None:
+    """band_start_row=None (geometry unknown) stays silent (back-compat)."""
+
+    profile = make_sheet_profile(
+        name="S",
+        header_row=4,
+        header_provenance="heuristic",
+        data_start_row=5,
+        data_end_row=8,
+    )
+    plan = build_read_plan(profile, None, None)
+    assert not [
+        n for n in plan.notes if n.startswith("rows above detected header")
+    ]
+
+
+def test_rows_above_header_note_multi_level_uses_band_top() -> None:
+    """With a multi-level header the dropped span ends above the *band top*.
+
+    Rows between the band start and the first merged header-band row are the
+    ones pandas drops (rows above ``header=[...]`` are ignored), so the note
+    anchors on ``multi_header_rows[0]``, not the leaf ``header_row``.
+    """
+
+    from excel_inspector.aggregator import _rows_above_header_notes
+
+    profile = make_sheet_profile(
+        name="S", header_row=4, header_provenance="heuristic"
+    )
+    assert _rows_above_header_notes(profile, 1, [3, 4]) == [
+        "rows above detected header not loaded: sheet rows 1-2 "
+        "(header at row 3); use a header_row override if these are data rows"
+    ]
+
+
 def test_nrows_is_full_inclusive_span() -> None:
     """nrows = full 1-based inclusive data span; interior skips NOT subtracted.
 

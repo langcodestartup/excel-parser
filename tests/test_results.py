@@ -287,6 +287,78 @@ def test_extract_skip_rows_remove_clears_excluded_note(fixture_path) -> None:
     ).any().any()
 
 
+def test_extract_surfaces_rows_above_header_in_notes(fixture_path) -> None:
+    """Issue #8: non-empty rows absorbed above the detected header get a note.
+
+    header_offset carries title rows 1-3 above the (correctly) detected header
+    at row 4; Rule 1 absorbs them into ``skiprows`` so they never reach the
+    frame. spec §8 forbids losing them silently — the dropped span surfaces on
+    the table's ``notes`` and through the serialized JSON contract.
+    """
+    wr = extract(fixture_path("header_offset"))
+    (table,) = wr.tables
+    expected = (
+        "rows above detected header not loaded: sheet rows 1-3 "
+        "(header at row 4); use a header_row override if these are data rows"
+    )
+    assert expected in table.notes
+    parsed = json.loads(wr.to_json())
+    assert expected in parsed["sheets"][0]["tables"][0]["notes"]
+
+
+def test_extract_small_mixed_table_detects_true_header(tmp_path) -> None:
+    """Issue #8 acceptance: the true header wins in a small mixed-type table.
+
+    Pre-fix, the §7.1 scoring picked the all-string data row 4 over the true
+    header at row 1 (a 1-row lookahead window is trivially type-consistent),
+    silently dropping rows 1-3. With the lookahead-evidence weighting the
+    true header wins: all 4 data rows load and no rows-above-header note
+    fires (nothing above the header was dropped).
+    """
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    rows = [
+        ("항목", "값", "달성률"),
+        ("총매출", 48300, "92%"),
+        ("총수량", 318, "104%"),
+        ("거래처수", "5개사", "100%"),
+        ("반품건수", 1, "-"),
+    ]
+    for r, row in enumerate(rows, 1):
+        for c, v in enumerate(row, 1):
+            ws.cell(r, c, v)
+    path = tmp_path / "issue8_small_mixed.xlsx"
+    wb.save(path)
+
+    wr = extract(path)
+    (table,) = wr.tables
+    assert table.header_row == 1
+    assert table.dataframe.shape == (4, 3)
+    assert list(table.dataframe.columns) == ["항목", "값", "달성률"]
+    assert not [
+        n for n in table.notes if n.startswith("rows above detected header")
+    ]
+
+
+def test_extract_no_rows_above_note_across_bands(fixture_path) -> None:
+    """A lower block's leading rows live in *other* bands -> no false note.
+
+    title_between_tables stacks a title band, two table bands, and a footnote
+    band. Each table's band starts at its own header row, so neither table
+    drops rows above its header — the rows above table 2 belong to other
+    bands (already surfaced via band-rejection warnings, plan v2 §4).
+    """
+    wr = extract(fixture_path("title_between_tables"))
+    assert len(wr.tables) == 2
+    for table in wr.tables:
+        assert not [
+            n for n in table.notes
+            if n.startswith("rows above detected header")
+        ]
+
+
 def test_extract_json_is_deterministic(fixture_path) -> None:
     p = fixture_path("offset_plus_subtotals")
     assert extract(p).to_json() == extract(p).to_json()
