@@ -45,6 +45,7 @@ from typing import Any
 import pandas as pd
 
 from .adapters.pandas_loader import load_dataframe
+from .exceptions import InspectorError
 from .models import ColumnProfile, ReadPlan, WorkbookProfile
 
 #: JSON schema version emitted by :meth:`WorkbookResult.to_dict` (plan v2 §3.0).
@@ -93,6 +94,26 @@ _UNNAMED_LABEL_RE = re.compile(r"^Unnamed: \d+(?:_level_\d+)?$")
 #: Separator joining MultiIndex levels into one flat column name
 #: (plan v2 Task 11.2 Step 3: ``"상위 / 하위"``).
 _LEVEL_JOIN = " / "
+
+_DATETIME_DTYPE = "datetime64[ns]"
+
+
+def _load_error_detail(exc: Exception) -> str:
+    """Render a loader exception for warnings / skip reasons."""
+
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _datetime_dtype_positions(plan: ReadPlan) -> list[str]:
+    """Return dtype_map positions that force pandas datetime coercion."""
+
+    return [
+        key
+        for key, dtype in sorted(
+            plan.dtype_map.items(), key=lambda item: int(item[0])
+        )
+        if dtype == _DATETIME_DTYPE
+    ]
 
 
 def _flatten_column_tuple(parts: tuple[Any, ...]) -> str:
@@ -348,6 +369,67 @@ def _postprocess_dataframe(df: pd.DataFrame, plan: ReadPlan) -> pd.DataFrame:
     return df
 
 
+def _load_table_dataframe(
+    file_path: str | Path,
+    plan: ReadPlan,
+    table_id: str,
+    warnings: list[str],
+) -> tuple[pd.DataFrame | None, list[str], str | None]:
+    """Load one table, absorbing non-domain load failures per spec §6.
+
+    ``InspectorError`` subclasses still propagate: corrupt/encrypted workbooks
+    are domain-stop conditions. Other pandas/openpyxl failures are downgraded
+    into warnings and, when possible, recovered by removing inferred datetime
+    dtype coercions that are known to reject common outlier tokens like "미정".
+    """
+
+    notes = list(plan.notes)
+    try:
+        df = _postprocess_dataframe(load_dataframe(file_path, plan), plan)
+        return df, notes, None
+    except InspectorError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - robustness boundary (spec §6)
+        original = _load_error_detail(exc)
+
+    datetime_positions = _datetime_dtype_positions(plan)
+    if datetime_positions:
+        fallback_dtype_map = {
+            key: dtype
+            for key, dtype in plan.dtype_map.items()
+            if key not in datetime_positions
+        }
+        fallback_plan = replace(plan, dtype_map=fallback_dtype_map)
+        try:
+            df = _postprocess_dataframe(
+                load_dataframe(file_path, fallback_plan), fallback_plan
+            )
+        except InspectorError:
+            raise
+        except Exception as retry_exc:  # noqa: BLE001 - see outer boundary
+            retry_detail = _load_error_detail(retry_exc)
+            warnings.append(
+                f"sheet {plan.sheet_name!r} table {table_id!r}: load failed "
+                f"after datetime dtype fallback: {retry_detail} "
+                f"(original: {original})"
+            )
+            return None, [], f"load-failed: {original}"
+
+        positions = ", ".join(datetime_positions)
+        note = (
+            "load dtype fallback: removed datetime64[ns] dtype(s) at "
+            f"column position(s) {positions} after {original}"
+        )
+        warnings.append(f"sheet {plan.sheet_name!r} table {table_id!r}: {note}")
+        notes.append(note)
+        return df, notes, None
+
+    warnings.append(
+        f"sheet {plan.sheet_name!r} table {table_id!r}: load failed: {original}"
+    )
+    return None, [], f"load-failed: {original}"
+
+
 def build_workbook_result(
     file_path: str | Path, profile: WorkbookProfile
 ) -> WorkbookResult:
@@ -383,32 +465,46 @@ def build_workbook_result(
                 skipped=True, skip_reason=reason))
             continue
         tables: list[TableResult] = []
+        load_failures: list[str] = []
         if sp.blocks:
             for number, block in enumerate(sp.blocks, start=1):
                 plan = block.read_plan
                 if plan is None:  # pragma: no cover - aggregator fills plans
                     continue
-                df = _postprocess_dataframe(
-                    load_dataframe(file_path, plan), plan
+                table_id = f"{sp.name}!T{number}"
+                df, notes, failure = _load_table_dataframe(
+                    file_path, plan, table_id, warnings
                 )
+                if failure is not None:
+                    load_failures.append(failure)
+                    continue
                 tables.append(TableResult(
-                    sheet_name=sp.name, table_id=f"{sp.name}!T{number}",
+                    sheet_name=sp.name, table_id=table_id,
                     dataframe=df, header_row=block.header_row,
                     header_confidence=block.header_confidence,
                     header_provenance=block.header_provenance,
-                    columns=list(block.columns), notes=list(plan.notes),
+                    columns=list(block.columns), notes=notes,
                 ))
         else:
-            df = _postprocess_dataframe(
-                load_dataframe(file_path, sp.read_plan), sp.read_plan
+            table_id = f"{sp.name}!T1"
+            df, notes, failure = _load_table_dataframe(
+                file_path, sp.read_plan, table_id, warnings
             )
-            tables.append(TableResult(
-                sheet_name=sp.name, table_id=f"{sp.name}!T1", dataframe=df,
-                header_row=sp.header_row,
-                header_confidence=sp.header_confidence,
-                header_provenance=sp.header_provenance,
-                columns=list(sp.columns), notes=list(sp.read_plan.notes),
-            ))
+            if failure is not None:
+                load_failures.append(failure)
+            else:
+                tables.append(TableResult(
+                    sheet_name=sp.name, table_id=table_id, dataframe=df,
+                    header_row=sp.header_row,
+                    header_confidence=sp.header_confidence,
+                    header_provenance=sp.header_provenance,
+                    columns=list(sp.columns), notes=notes,
+                ))
+        if load_failures and not tables:
+            sheets.append(SheetResultEntry(
+                name=sp.name, is_visible=sp.is_visible, tables=[],
+                skipped=True, skip_reason=load_failures[0]))
+            continue
         sheets.append(SheetResultEntry(
             name=sp.name, is_visible=sp.is_visible, tables=tables))
     return WorkbookResult(
