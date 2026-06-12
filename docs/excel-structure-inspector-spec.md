@@ -12,7 +12,7 @@
 
 ## 0. 개정 이력 / 핵심 설계 결정
 
-본 판은 초안에 대한 갭 분석(High 4 · Medium 23 · Low 38 확정)을 반영해 "어떻게 정확히"의 공백을 메운 것이다. 초안에서 미정의였던 6개 핵심 결정을 아래와 같이 확정한다. 본문 곳곳에 `[D#]` 태그로 적용 위치를 표기한다.
+본 판은 초안에 대한 갭 분석(High 4 · Medium 23 · Low 38 확정)을 반영해 "어떻게 정확히"의 공백을 메운 것이다. 초안에서 미정의였던 7개 핵심 결정을 아래와 같이 확정한다. 본문 곳곳에 `[D#]` 태그로 적용 위치를 표기한다.
 
 | ID | 결정 | 해소한 갭 |
 | --- | --- | --- |
@@ -22,6 +22,7 @@
 | **[D4]** | **휴리스틱 상수 명시**: 헤더 점수식·표본 크기, 타입 판정 임계값, 경계 탐지 밀도·키워드를 v1 상수로 고정(§7). 외부 설정화는 v1+. | 산출식/임계값 전무 |
 | **[D5]** | **컬럼 정체성 단일화**: `ColumnProfile.index`는 **표 좌상단을 0으로 하는 0-based 위치**. `ReadPlan.dtype_map`의 키는 **컬럼 위치(0-based)를 문자열화한 값**으로 고정(`None` 컬럼명 문제 회피). | dtype_map 키 모호 / 컬럼 정체성 불일치 |
 | **[D6]** | **v1 범위 축소·우선순위 교정**: Formula Detector와 다단 헤더(`header: list[int]`)는 **v1+로 연기**. 핵심 가치인 경계 탐지를 헤더 직후 우선순위로 상향. | 과대범위 / 핵심 가치 우선순위 역전 |
+| **[D7]** | **블록 단위 오버라이드 채널** (issue #9): `SheetOverride.block_overrides: dict[int, BlockOverride]` — 키는 대상 밴드에 포함된 임의의 1-based 앵커 행. `BlockOverride.header_row`는 int(블록 헤더 강제) \| 명시적 None(블록 headerless 선언) \| 미지정(휴리스틱 위임)의 3-상태(`_UNSET` 센티널). 충돌·오류는 특이성 우선(블록 > 시트 > 휴리스틱) + 경고로 처리하고 예외는 던지지 않는다(§6). headerless 블록은 보수적으로 분석한다: 데이터 구간 = 밴드 전체, 컬럼 경계 미검출(전체 폭), 타입 프로파일링 생략. | 적층 시트에서 개별 블록 header_row 지정 불가 / 시트 전역 headerless 선언이 적층 테이블을 파괴 |
 
 ---
 
@@ -119,6 +120,7 @@
   2. 헤더 아래 소계/합계/빈 줄(`skip_rows`, 1-based)을 0-based 절대 인덱스로 변환해 `skiprows`에 합친다.
   3. `header`는 위 `skiprows` 적용 후 프레임에서 헤더가 차지하는 위치로 정규화한다(헤더가 선행행을 모두 건너뛴 직후이면 0).
   4. `nrows`는 데이터 구간의 전체 행 수 = `data_end_row - data_start_row + 1`(1-based 포함 구간). **내부 소계/빈 줄 skip을 차감하지 않는다.** pandas `nrows`는 헤더 이후 *소비할 원본 행 수*를 세며, 내부 `skiprows`는 출력에서 제거되지만 nrows 예산은 소비한다. 차감하면 읽기 창이 데이터 끝까지 닿지 못해 마지막 데이터 행이 누락된다(pandas 3.0.3 실측 확인). 이 규칙은 golden 왕복 테스트로 고정한다.
+  5. **headerless 블록 변환 [D7]**: 명시적 headerless 블록(`BlockOverride(header_row=None)`)의 플랜은 `header=None`이며, 밴드 시작 위 모든 행(`1 .. data_start_row-1`)을 0-based `skiprows`로 흡수한다. `nrows`는 규칙 4 그대로 밴드 전체 행 수. 시트 단위 headerless 선언은 경계 분석을 생략해 `data_start_row`가 미설정이므로 이 규칙의 영향을 받지 않는다(기존 경로 불변).
 - **usecols 도출**: `data_left_col`~`data_right_col`(1-based)을 엑셀 열문자 범위 문자열(예: `"B:H"`)로 변환. 경계 미검출 시 `None`(전체 열).
 - **dtype_map 도출 [D5]**: 키 = usecols 선택 프레임 기준 0-based 컬럼 위치의 문자열(`"0"`, `"1"`, ...), 값 = pandas dtype 문자열. 적재기는 키를 정수로 환원해 적용한다.
 - **override 적용 [D2]**: `InspectionOptions`에 명시된 필드는 분석기 산출을 무시하고 override 값으로 덮어쓰며 `provenance=manual`로 기록한다.
@@ -137,7 +139,9 @@
 | `header_confidence_threshold` | float | 헤더 신뢰도 임계값(기본 0.5) |
 | `skip_keywords` | list[str] \| None | 경계 키워드 추가/대체 |
 
-`SheetOverride`: `header_row: int | None`(1-based 강제 지정), `skip_rows_add: list[int]`, `skip_rows_remove: list[int]`, `dtype_force: dict[str, str]`, `is_tabular: bool | None`.
+`SheetOverride`: `header_row: int | None`(1-based 강제 지정), `skip_rows_add: list[int]`, `skip_rows_remove: list[int]`, `dtype_force: dict[str, str]`, `is_tabular: bool | None`, `block_overrides: dict[int, BlockOverride]` **[D7]**.
+
+`BlockOverride` **[D7]**: `header_row: int | None`(1-based; int = 블록 헤더 강제 — 앵커 밴드 내여야 함, 명시적 None = 블록 headerless 선언, 미지정 = 휴리스틱 위임). `block_overrides`의 키는 대상 밴드에 포함된 임의의 1-based 절대 앵커 행 **[D1]**. 해석은 `options.resolve_block_overrides`가 전담하며 경고 접두사는 `block_override:`로 고정한다(분석기 모듈 접두사 규약의 의도적 예외 — 채널 이름이 곧 출처). 밴드 밖 앵커·같은 밴드 중복 앵커(낮은 앵커 승리)·앵커 밴드 밖 int header_row·빈 BlockOverride는 각각 경고 후 무시되며, 무시된 밴드는 특이성 체인(시트 → 휴리스틱)으로 폴백한다. 시트 전역 `header_row=None`과 block_overrides가 공존하면 모순 경고 후 블록 채널이 이긴다. 단일 밴드 시트의 block_overrides는 경고 후 무시(시트 채널 사용 안내).
 
 ### 5.1 WorkbookProfile
 | 필드 | 타입 | 설명 |

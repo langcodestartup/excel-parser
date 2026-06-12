@@ -50,6 +50,44 @@ _UNSET: Final[_Unset] = _Unset()
 
 
 @dataclass
+class BlockOverride:
+    """Per-block manual override, anchored by a row inside the target band [D7].
+
+    Registered on :attr:`SheetOverride.block_overrides` keyed by an *anchor
+    row* — any 1-based absolute row inside the target band [D1] (e.g. any row
+    from a ``rows 19-23`` warning). The header channel reuses the
+    :data:`_UNSET` sentinel contract of :class:`SheetOverride` (HIGH #2), so
+    three states are representable:
+
+    * ``header_row`` left at :data:`_UNSET` — defer to the heuristic locator.
+    * ``header_row=<int>`` — force this block's header to that 1-based row
+      (must fall inside the anchored band; validated by
+      ``options.resolve_block_overrides``).
+    * ``header_row=None`` — declare this block headerless: the band is a
+      table whose data region is the whole band (conservative analysis;
+      boundary/type profiling skipped, same contract as the sheet-level
+      headerless declaration).
+
+    Attributes:
+        header_row: Forced header row (1-based), ``None`` for a headerless
+            declaration, or the :data:`_UNSET` sentinel. Whether the field
+            was actually specified is exposed via :attr:`header_row_set`.
+    """
+
+    header_row: int | None | _Unset = _UNSET
+    #: Whether ``header_row`` was explicitly specified (set in
+    #: ``__post_init__``; not a constructor argument).
+    header_row_set: bool = field(init=False, default=False)
+
+    def __post_init__(self) -> None:
+        """Record whether ``header_row`` was specified [D7] (HIGH #2 pattern)."""
+
+        self.header_row_set = self.header_row is not _UNSET
+        if self.header_row is _UNSET:
+            self.header_row = None
+
+
+@dataclass
 class SheetOverride:
     """Per-sheet manual overrides applied during inspection [D2].
 
@@ -76,6 +114,8 @@ class SheetOverride:
         dtype_force: Forced dtypes keyed by 0-based column position string
             (matching :attr:`ReadPlan.dtype_map` key convention) [D5].
         is_tabular: Forced tabular-candidate flag, or ``None`` to defer.
+        block_overrides: Per-block overrides keyed by anchor row [D7]; see
+            :class:`BlockOverride`.
     """
 
     header_row: int | None | _Unset = _UNSET
@@ -83,6 +123,10 @@ class SheetOverride:
     skip_rows_remove: list[int] = field(default_factory=list)
     dtype_force: dict[str, str] = field(default_factory=dict)
     is_tabular: bool | None = None
+    #: Per-block overrides keyed by anchor row (any 1-based row inside the
+    #: target band) [D7]. Resolution / conflict policy lives in
+    #: ``options.resolve_block_overrides``.
+    block_overrides: dict[int, BlockOverride] = field(default_factory=dict)
     #: Whether ``header_row`` was explicitly specified (set in ``__post_init__``;
     #: not a constructor argument). ``True`` for an int or an explicit ``None``.
     header_row_set: bool = field(init=False, default=False)

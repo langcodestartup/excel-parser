@@ -41,7 +41,7 @@ There is no linter/formatter configured.
 
 ## Authoritative docs
 
-`docs/excel-structure-inspector-spec.md` (spec, Korean), plus the v1 and v2 implementation plans in `docs/`. Code comments cite these constantly as `spec §N` and decision IDs `[D1]`–`[D6]` (defined in the spec's §0 revision-history table). When changing behavior, check the cited section first — the spec is the contract, and tests pin it.
+`docs/excel-structure-inspector-spec.md` (spec, Korean), plus the v1 and v2 implementation plans in `docs/`. Code comments cite these constantly as `spec §N` and decision IDs `[D1]`–`[D7]` (defined in the spec's §0 revision-history table). When changing behavior, check the cited section first — the spec is the contract, and tests pin it.
 
 ## Architecture
 
@@ -82,6 +82,8 @@ Open failures are disambiguated by sniffing the OLE2 magic: encrypted container 
 ### Override channel [D2] (`models.py`, `options.py`)
 
 `InspectionOptions.sheet_overrides` carries per-sheet `SheetOverride`s. Every estimated field records `provenance` (`"heuristic"`/`"manual"`/`"default"`); an overridden field skips heuristic computation and gets `provenance="manual", confidence=1.0`. `SheetOverride.header_row` uses an `_UNSET` sentinel to distinguish three states: unspecified (defer to heuristic), `int` (forced row), and explicit `None` (declared headerless) — check via `header_row_set` / `options.py:has_header_override()`, never by the value alone.
+
+Block-level channel [D7] (issue #9): `SheetOverride.block_overrides: dict[int, BlockOverride]` anchors a per-band override by any 1-based row inside the target band; `BlockOverride(header_row=None)` declares one band headerless (data region = whole band, profiling skipped) without collapsing the sheet, and conflicts resolve by specificity (block > sheet > heuristic) with warnings, never exceptions. Resolution lives in `options.resolve_block_overrides`; its warnings deliberately use the `block_override:` prefix (channel name, not emitting module).
 
 ### Heuristics [D4] (`heuristics.py`)
 

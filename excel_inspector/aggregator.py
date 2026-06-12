@@ -171,6 +171,7 @@ def build_read_plan(
     warnings: list[str] | None = None,
     *,
     band_start_row: int | None = None,
+    declared_headerless: bool = False,
 ) -> ReadPlan:
     """Build a v1 :class:`ReadPlan` for one sheet (spec §4.8) [D1][D5].
 
@@ -192,6 +193,12 @@ def build_read_plan(
             rows were absorbed by Rule 1 — surfaced as a "no silent loss"
             note (spec §8; issue #8). ``None`` (geometry unknown, e.g. a
             direct v1 call) keeps the plan note-free.
+        declared_headerless: ``True`` for a [D7] block-scoped headerless
+            declaration (``BlockOverride(header_row=None)``). Forces the
+            headerless plan shape (``header=None``) and — because a block's
+            data region IS its band — absorbs every row above
+            ``data_start_row`` into ``skiprows``. The sheet-level headerless
+            path never sets ``data_start_row``, so it is unaffected.
 
     Returns:
         The synthesized :class:`ReadPlan` (0-based coords).
@@ -207,7 +214,7 @@ def build_read_plan(
     #     first data row is NOT consumed as column names.
     #   * a detection *fallback* (no header found, no override) -> v1 assumes
     #     the first row is the header (header=0).
-    headerless_override = (
+    headerless_override = declared_headerless or (
         has_header_override(options, profile.name)
         and profile.header_row is None
     )
@@ -249,6 +256,17 @@ def build_read_plan(
     header_row = profile.header_row
     if headerless_override:
         header = None
+        # [D7] declared-headerless block: the band's data region is known,
+        # so every leading row (1 .. data_start_row-1) is absorbed into
+        # skiprows — the [D1] rule-1 analogue for a block with no header
+        # anchor. The sheet-level headerless path never sets data_start_row
+        # (boundary analysis is skipped), so it stays bit-identical.
+        if (
+            declared_headerless
+            and profile.data_start_row is not None
+            and profile.data_start_row > 1
+        ):
+            skiprows.extend(range(0, profile.data_start_row - 1))
     elif multi_header_rows is not None:
         # [D1] conversion: the contiguous 1-based band rows become 0-based
         # **absolute** indices. Rows above the band are NOT absorbed into
@@ -823,8 +841,19 @@ def build_block_read_plan(
         columns=list(block.columns),
         subtotal_skip_labels=dict(block.subtotal_skip_labels),
     )
+    # [D7] a declared-headerless block: header_row None with manual
+    # provenance is impossible for any other block kind (a manual block has
+    # always carried an int header; a heuristic band with no header is
+    # judged not-a-table), so the pair is a safe discriminator.
+    declared_headerless = (
+        block.header_row is None and block.header_provenance == "manual"
+    )
     plan = build_read_plan(
-        synthetic, None, warnings, band_start_row=block.band_start_row
+        synthetic,
+        None,
+        warnings,
+        band_start_row=block.band_start_row,
+        declared_headerless=declared_headerless,
     )
     plan.dtype_map.update(get_dtype_force(options, profile.name))
 

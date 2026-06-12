@@ -9,8 +9,14 @@ the analyzer skips its own computation, records the override value, and marks
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
 from .heuristics import HEADER_CONFIDENCE_THRESHOLD, SKIP_KEYWORDS
-from .models import InspectionOptions, SheetOverride
+from .models import BlockOverride, InspectionOptions, SheetOverride
+
+if TYPE_CHECKING:  # runtime import would cycle through the analyzers package
+    from .analyzers.block_segmenter import RowBand
 
 
 def get_sheet_override(
@@ -103,3 +109,75 @@ def get_is_tabular_override(
     if override is None:
         return None
     return override.is_tabular
+
+
+def resolve_block_overrides(
+    options: InspectionOptions | None,
+    sheet_name: str,
+    bands: Sequence[RowBand],
+) -> tuple[dict[int, BlockOverride], list[str]]:
+    """Resolve anchor-keyed block overrides onto row bands [D7] (issue #9).
+
+    Anchors are processed in ascending order (deterministic). Resolution
+    rules (design doc §4): an anchor inside no band, a duplicate anchor to a
+    band already claimed by a valid override, an empty override (no field
+    specified), and an int ``header_row`` outside the anchored band are each
+    warned and ignored — never raised (spec §6). A band whose override was
+    ignored falls back to the specificity chain (sheet-level override where
+    its absolute row anchors the band, else the heuristic).
+
+    Args:
+        options: The inspection options, or ``None``.
+        sheet_name: Target sheet name.
+        bands: The sheet's detected row bands (1-based inclusive [D1]).
+
+    Returns:
+        ``(resolved, warnings)`` where ``resolved`` maps each claimed band's
+        ``start_row`` to its winning :class:`BlockOverride`.
+    """
+
+    override = get_sheet_override(options, sheet_name)
+    if override is None or not override.block_overrides:
+        return {}, []
+
+    resolved: dict[int, BlockOverride] = {}
+    claimed: dict[int, int] = {}  # band start_row -> winning anchor row
+    warnings: list[str] = []
+    for anchor in sorted(override.block_overrides):
+        block_override = override.block_overrides[anchor]
+        band = next(
+            (b for b in bands if b.start_row <= anchor <= b.end_row), None
+        )
+        if band is None:
+            warnings.append(
+                f"block_override: sheet {sheet_name!r}: anchor row {anchor} "
+                f"falls inside no detected table band; override ignored"
+            )
+            continue
+        if band.start_row in claimed:
+            warnings.append(
+                f"block_override: sheet {sheet_name!r}: anchor row {anchor} "
+                f"targets the same band (rows {band.start_row}-"
+                f"{band.end_row}) as anchor row {claimed[band.start_row]}; "
+                f"override ignored"
+            )
+            continue
+        if not block_override.header_row_set:
+            warnings.append(
+                f"block_override: sheet {sheet_name!r}: anchor row {anchor}: "
+                f"no override field specified; override ignored"
+            )
+            continue
+        if isinstance(block_override.header_row, int) and not (
+            band.start_row <= block_override.header_row <= band.end_row
+        ):
+            warnings.append(
+                f"block_override: sheet {sheet_name!r}: anchor row {anchor}: "
+                f"header_row {block_override.header_row} falls outside the "
+                f"anchored band (rows {band.start_row}-{band.end_row}); "
+                f"override ignored"
+            )
+            continue
+        claimed[band.start_row] = anchor
+        resolved[band.start_row] = block_override
+    return resolved, warnings
