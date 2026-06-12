@@ -225,6 +225,45 @@ def test_extract_left_margin_with_subtotal_records(fixture_path) -> None:
     assert list(table.dataframe.columns) == ["sku", "qty", "price"]
 
 
+def test_extract_blank_leading_header_preserves_key_column(tmp_path) -> None:
+    """Issue #16: a blank leading header cell must not drop the key column.
+
+    Statistical time-series sheets often leave the top-left header cell empty
+    while column A carries the date axis. The extracted table must include that
+    axis instead of silently narrowing ``usecols`` to B:C.
+    """
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "환율"
+    ws.cell(1, 1, None)
+    ws.cell(1, 2, "USD")
+    ws.cell(1, 3, "JPY")
+    for row in range(2, 28):
+        ws.cell(row, 1, dt.datetime(1990 + row, 1, 1))
+        ws.cell(row, 2, row * 1.1)
+        ws.cell(row, 3, row * 2.2)
+    path = tmp_path / "blank_leading_key.xlsx"
+    wb.save(path)
+
+    wr = extract(path)
+    (table,) = wr.tables
+
+    assert wr.warnings == []
+    assert table.notes == []
+    assert table.dataframe.shape == (26, 3)
+    assert str(table.dataframe.columns[0]).startswith("Unnamed:")
+    assert list(table.dataframe.columns[1:]) == ["USD", "JPY"]
+    assert table.dataframe.iloc[0, 0] == pd.Timestamp("1992-01-01")
+    assert [(c.index, c.name, c.inferred_type) for c in table.columns] == [
+        (0, None, "date"),
+        (1, "USD", "number"),
+        (2, "JPY", "number"),
+    ]
+
+
 def test_extract_headerless_override_notes_dtype_skip(fixture_path) -> None:
     """L6 (plan v2 Phase 13 Step 2): the headerless note reaches the JSON.
 

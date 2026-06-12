@@ -19,6 +19,7 @@ single 1-based -> 0-based conversion is the aggregator's job, covered by
 
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 
 from excel_inspector import (
@@ -351,6 +352,34 @@ def test_isolated_blank_run_terminates_block() -> None:
     BoundaryDetector().analyze(ctx)
     assert profile.data_start_row == 2
     assert profile.data_end_row == 3
+    assert profile.skip_rows == []
+
+
+def test_isolated_blank_leading_header_key_column_kept() -> None:
+    """Issue #16: a blank leading header cell can still be a key column.
+
+    The header span is B:C because A1 is empty, but A2:A4 holds the time axis
+    for the same data rows. The boundary detector must widen the table to
+    A:C; since that is the full used width, it reports no explicit usecols
+    restriction (``data_left_col``/``data_right_col`` stay ``None``).
+    """
+
+    rows = [
+        [None, "USD", "JPY"],  # row 1 header; A1 is intentionally empty
+        [_dt.datetime(1992, 1, 1), 2.2, 4.4],
+        [_dt.datetime(1993, 1, 1), 3.3, 6.6],
+        [_dt.datetime(1994, 1, 1), 4.4, 8.8],
+    ]
+    profile = make_sheet_profile(
+        name="S", header_row=1, max_row=len(rows), max_col=3
+    )
+    ctx = make_context(sheets=[profile], loader=_FakeLoader({"S": rows}))
+
+    BoundaryDetector().analyze(ctx)
+    assert profile.data_start_row == 2
+    assert profile.data_end_row == 4
+    assert profile.data_left_col is None
+    assert profile.data_right_col is None
     assert profile.skip_rows == []
 
 

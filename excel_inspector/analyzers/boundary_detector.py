@@ -10,9 +10,11 @@ analyzer reads the rows below it in **data mode** (read_only streaming) [D3]
 and applies the §7.2 rules:
 
 * **Column boundaries** — the longest contiguous run of non-empty cells in the
-  header row fixes ``data_left_col``/``data_right_col`` (1-based). The width of
-  that span (``data_col_count``) is the density denominator, so a left filler
-  column does not drag the density of the real table down.
+  header row fixes ``data_left_col``/``data_right_col`` (1-based). A blank
+  header cell immediately to the left of that run is folded in when the body
+  beneath it is a consistently populated key column (issue #16). The width of
+  the final span (``data_col_count``) is the density denominator, so a left
+  filler column does not drag the density of the real table down.
 * **Row density** — ``density(r) = non_empty_cells(r) / data_col_count`` over
   the table column span. A row with ``density < LOW_DENSITY_THRESHOLD`` (0.3) is
   a subtotal/separator candidate. The "only a single column filled"
@@ -84,12 +86,18 @@ sheet-level applier copies the result onto the profile.
 
 from __future__ import annotations
 
+import datetime as _dt
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..context import InspectionContext
-from ..heuristics import BLANK_RUN, LOW_DENSITY_THRESHOLD
+from ..heuristics import (
+    BLANK_RUN,
+    LOW_DENSITY_THRESHOLD,
+    TYPE_SAMPLE_ROWS,
+    TYPE_SUCCESS_THRESHOLD,
+)
 from ..models import SheetProfile
 from ..options import get_sheet_override, get_skip_keywords
 from ..pipeline import Analyzer
@@ -426,6 +434,66 @@ def _span_density(
     return non_empty / span, non_empty
 
 
+def _value_kind(value: object) -> str | None:
+    """Coarse non-empty value kind used by the leading-key-column heuristic."""
+
+    if _is_empty(value):
+        return None
+    if isinstance(value, bool):
+        return "other"
+    if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+        return "date"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "text"
+    return "other"
+
+
+@dataclass
+class _LeadingKeyColumnStats:
+    """Evidence that a blank-header column is really a body key column."""
+
+    observed_rows: int = 0
+    populated_rows: int = 0
+    kinds: dict[str, int] = field(default_factory=dict)
+
+    def add(self, value: object) -> None:
+        """Record one body row for this candidate column."""
+
+        self.observed_rows += 1
+        kind = _value_kind(value)
+        if kind is None:
+            return
+        self.populated_rows += 1
+        self.kinds[kind] = self.kinds.get(kind, 0) + 1
+
+    def is_consistent_key(self) -> bool:
+        """Whether the sampled evidence is strong enough to extend left."""
+
+        if self.observed_rows <= 0 or self.populated_rows <= 0:
+            return False
+        populated_ratio = self.populated_rows / self.observed_rows
+        if populated_ratio < TYPE_SUCCESS_THRESHOLD:
+            return False
+        kind_ratio = max(self.kinds.values()) / self.populated_rows
+        return kind_ratio >= TYPE_SUCCESS_THRESHOLD
+
+
+def _blank_leading_header_columns(
+    header: list[object], left_col: int
+) -> list[int]:
+    """Blank header columns immediately left of ``left_col`` (nearest first)."""
+
+    columns: list[int] = []
+    for col in range(left_col - 1, 0, -1):
+        value = header[col - 1] if col - 1 < len(header) else None
+        if not _is_empty(value):
+            break
+        columns.append(col)
+    return columns
+
+
 @dataclass
 class BlockBoundary:
     """Block-local boundary detection result (plan v2 Task 10.2 guard 3).
@@ -539,10 +607,12 @@ class BoundaryDetector(Analyzer):
         header stops at ``min(window_end, max_row)`` instead of running to the
         sheet's end. ``row_window=None`` means the whole sheet (v1 behavior).
 
-        The header row is read first (it is near the top), then the rows below
-        it are processed in a single forward **streaming** pass — no row beyond
-        the header is materialized into a list, so a large table is bounded by
-        running state only (spec §8; no full materialization) [D3].
+        The header row is read first (it is near the top). A bounded streaming
+        evidence scan may sample up to ``TYPE_SAMPLE_ROWS`` rows to preserve
+        blank-header leading key columns (issue #16), then the rows below it
+        are processed in a forward streaming pass — no row beyond the header is
+        materialized into a list, so a large table is bounded by running state
+        only (spec §8; no full materialization) [D3].
 
         Merge bridging (plan v2 Task 11.1): the Merge Scanner's collected
         spans (``context.merge_spans``) drive the header-span virtual fill and
@@ -598,6 +668,17 @@ class BoundaryDetector(Analyzer):
         ):
             left_col = None
             right_col = None
+
+        if left_col is not None and right_col is not None:
+            left_col = self._extend_left_boundary_for_blank_key_columns(
+                context,
+                profile,
+                header_values,
+                left_col,
+                right_col,
+                header_row,
+                window_end,
+            )
 
         # spec §4.5: column boundaries are reported only when the table occupies
         # *part* of the used range. A left-anchored, full-width table (starts at
@@ -781,6 +862,63 @@ class BoundaryDetector(Analyzer):
             if row in subtotal_labels
         }
         return result
+
+    def _extend_left_boundary_for_blank_key_columns(
+        self,
+        context: InspectionContext,
+        profile: SheetProfile,
+        header_values: list[object],
+        left_col: int,
+        right_col: int,
+        header_row: int,
+        end_row: int | None,
+    ) -> int:
+        """Include blank-header leading key columns when body evidence is clear.
+
+        Issue #16: many time-series tables leave the top-left header cell blank
+        while column A carries the row key/date axis. The header-only
+        contiguous-run rule would choose B:... and silently drop A via
+        ``usecols``. To avoid pulling in true left margins, only blank header
+        columns immediately adjacent to the resolved header run are considered,
+        and each must be populated with one consistent value kind across the
+        sampled body rows whose original header span contains data.
+        """
+
+        candidate_cols = _blank_leading_header_columns(
+            header_values, left_col
+        )
+        if not candidate_cols:
+            return left_col
+
+        stats = {
+            col: _LeadingKeyColumnStats() for col in candidate_cols
+        }
+        blank_run = 0
+        observed = 0
+        for _, row in self._iter_rows_below(
+            context, profile, header_row, end_row
+        ):
+            _, non_empty = _span_density(row, left_col, right_col)
+            if non_empty == 0:
+                blank_run += 1
+                if blank_run >= BLANK_RUN:
+                    break
+                continue
+            blank_run = 0
+
+            observed += 1
+            for col in candidate_cols:
+                value = row[col - 1] if col - 1 < len(row) else None
+                stats[col].add(value)
+            if observed >= TYPE_SAMPLE_ROWS:
+                break
+
+        extended_left = left_col
+        for col in candidate_cols:
+            if not stats[col].is_consistent_key():
+                break
+            extended_left = col
+        return extended_left
 
     @staticmethod
     def _apply_skip_overrides(
