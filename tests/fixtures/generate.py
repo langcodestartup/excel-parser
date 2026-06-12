@@ -277,14 +277,16 @@ FIXTURES: dict[str, FixtureSpec] = {
         "the rows 6-7 blank run is the terminator and rows 9-10 lie beyond it "
         "(not part of the table). skip_rows expected empty (no interior "
         "subtotal). max_row=10, max_col=3. Phase 10b expected behavior (W-A "
-        "review LOW #9): row bands are [1..5] and [9..10]; the noise band "
-        "scores '기타 메모' (row 9) as a header over the data row 10, so it IS "
-        "extracted — as 'Sheet1!T2' with header_row=9, data rows 10-10, and a "
-        "1-column span data_left_col=data_right_col=1 (the header row has one "
-        "populated cell). Because the span is band-locally 1 column wide, T2's "
-        "notes must carry the '1-column band — verify this is a real table' "
-        "advisory (review LOW #7). T1 and the flat sheet fields keep the exact "
-        "v1 golden values above.",
+        "review LOW #9, recalibrated by issue #8): row bands are [1..5] and "
+        "[9..10]. Pre-issue-#8 the noise band crossed the 0.5 threshold only "
+        "via the free type-consistency of its single-row lookahead window and "
+        "was extracted as 'Sheet1!T2' with the 1-column verify advisory "
+        "(review LOW #7); with the §7.1 lookahead-evidence factor it scores "
+        "below threshold and is REJECTED — exactly one table 'Sheet1!T1', and "
+        "the not-a-table judgment for rows 9-10 surfaces as a warning (spec "
+        "§8). The LOW #7 advisory contract stays pinned at the plan level "
+        "(test_multi_table). T1 and the flat sheet fields keep the exact v1 "
+        "golden values above.",
     ),
     "interior_blank": FixtureSpec(
         "interior_blank.xlsx",

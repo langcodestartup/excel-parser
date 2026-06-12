@@ -306,14 +306,14 @@ def test_extract_surfaces_rows_above_header_in_notes(fixture_path) -> None:
     assert expected in parsed["sheets"][0]["tables"][0]["notes"]
 
 
-def test_extract_misdetected_header_surfaces_dropped_rows(tmp_path) -> None:
-    """Issue #8 acceptance: a header misdetection must not lose rows silently.
+def test_extract_small_mixed_table_detects_true_header(tmp_path) -> None:
+    """Issue #8 acceptance: the true header wins in a small mixed-type table.
 
-    In this small mixed-type table the §7.1 scoring picks row 4 (the
-    all-string data row) over the true header at row 1, so rows 1-3 vanish
-    from the frame. Until the scoring is recalibrated (issue #8 proposal 2 —
-    revisit the pinned header_row then), spec §8 demands the dropped rows
-    surface via notes so the caller can recover with a header_row override.
+    Pre-fix, the §7.1 scoring picked the all-string data row 4 over the true
+    header at row 1 (a 1-row lookahead window is trivially type-consistent),
+    silently dropping rows 1-3. With the lookahead-evidence weighting the
+    true header wins: all 4 data rows load and no rows-above-header note
+    fires (nothing above the header was dropped).
     """
     from openpyxl import Workbook
 
@@ -334,12 +334,12 @@ def test_extract_misdetected_header_surfaces_dropped_rows(tmp_path) -> None:
 
     wr = extract(path)
     (table,) = wr.tables
-    # Current §7.1 misdetection, pinned deliberately (issue #8 proposal 2).
-    assert table.header_row == 4
-    assert (
-        "rows above detected header not loaded: sheet rows 1-3 "
-        "(header at row 4); use a header_row override if these are data rows"
-    ) in table.notes
+    assert table.header_row == 1
+    assert table.dataframe.shape == (4, 3)
+    assert list(table.dataframe.columns) == ["항목", "값", "달성률"]
+    assert not [
+        n for n in table.notes if n.startswith("rows above detected header")
+    ]
 
 
 def test_extract_no_rows_above_note_across_bands(fixture_path) -> None:
