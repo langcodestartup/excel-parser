@@ -312,6 +312,15 @@ def build_read_plan(
     if headerless_override:
         notes.append(_HEADERLESS_NOTE)
 
+    # Detection-fallback visibility (issue #10): no header was detected and
+    # none was declared, yet the Rule-1 fallback above assumed the first row
+    # is the header. A needs-manual sheet (memo-like content) and a genuine
+    # table with a weak non-string header are indistinguishable at this
+    # point, so the load proceeds — but never silently: the assumption is
+    # surfaced so consumers can verify or override (spec §8).
+    if profile.header_row is None and not headerless_override:
+        notes.append(_NEEDS_MANUAL_HEADER_NOTE)
+
     return ReadPlan(
         sheet_name=profile.name,
         engine="openpyxl",
@@ -455,6 +464,11 @@ _FORMULA_NOTE_PREFIX = "formula column "
 #: dtype inference was skipped — made visible instead of silently lost. The
 #: exact string is a stable contract (the plan text), pinned by tests.
 _HEADERLESS_NOTE = "headerless sheet: dtype inference skipped"
+
+_NEEDS_MANUAL_HEADER_NOTE = (
+    "header heuristic failed: first row assumed as header; verify or set a "
+    "header_row / headerless override"
+)
 
 
 def _formula_notes(profile: SheetProfile) -> list[str]:
@@ -958,6 +972,15 @@ class PlanAggregator(Analyzer):
         Non-tabular sheets (``is_tabular_candidate=False``) are excluded from
         loading (spec §9) and receive no read plan.
 
+        All-bands-rejected sheets (issue #10): a multi-band tabular candidate
+        whose Block Analyzer pass produced **no** block (every band judged
+        non-table) also receives no read plan — the flat fallback would load
+        the very rows the per-band warnings declared skipped, contradicting
+        them (spec §8, no silent loss). The exclusion is surfaced as a
+        warning. Override channel stays authoritative [D2]: a header_row
+        override (forced or explicit headerless) or a manual
+        ``is_tabular=True`` keeps the v1 flat path.
+
         Blocks (plan v2 Task 10.2 Step 3): every :class:`TableBlock` gets its
         own plan via :func:`build_block_read_plan`. The sheet's flat plan
         follows the mirror rule — for a multi-band sheet it *is*
@@ -980,8 +1003,9 @@ class PlanAggregator(Analyzer):
             if not profile.is_tabular_candidate:
                 profile.read_plan = None
                 continue
+            bands = context.row_bands.get(profile.name) or []
             if profile.blocks:
-                multi_band = len(context.row_bands.get(profile.name) or []) >= 2
+                multi_band = len(bands) >= 2
                 for block in profile.blocks:
                     block.read_plan = build_block_read_plan(
                         profile,
@@ -994,11 +1018,28 @@ class PlanAggregator(Analyzer):
                     # Flat mirror: the sheet-level plan is the top-most block's.
                     profile.read_plan = profile.blocks[0].read_plan
                     continue
+            elif (
+                len(bands) >= 2
+                and not has_header_override(context.options, profile.name)
+                and profile.is_tabular_provenance != "manual"
+            ):
+                # issue #10: every band was analyzed and judged non-table, so
+                # the flat fallback plan would load rows the Block Analyzer
+                # warnings already declared "skipped". Emit no plan; surface
+                # the exclusion instead (spec §8). Manual overrides [D2] keep
+                # the flat path (guarded above).
+                profile.read_plan = None
+                context.add_warning(
+                    f"plan_aggregator: sheet {profile.name!r}: all "
+                    f"{len(bands)} detected bands were judged non-table; no "
+                    f"read plan emitted (use a header_row or is_tabular "
+                    f"override to force loading)"
+                )
+                continue
             # Band geometry for the no-silent-loss note (issue #8): the flat
             # plan's enclosing band is the sheet's first (the flat fields
             # mirror blocks[0]); the mirror block passes the same value, so
             # the mirror-plan == flat-plan invariant holds.
-            bands = context.row_bands.get(profile.name) or []
             profile.read_plan = build_read_plan(
                 profile,
                 context.options,

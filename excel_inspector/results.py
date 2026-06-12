@@ -360,16 +360,27 @@ def build_workbook_result(
     Multi-table sheets (plan v2 Task 10.2 Step 4): when ``sp.blocks`` is
     populated, every block yields one :class:`TableResult` with the id
     ``"{sheet}!T{n}"`` (``n`` 1-based, top-down). A sheet without blocks
-    (headerless / fallback) keeps the v1 single-table path driven by the flat
-    ``read_plan``.
+    (headerless / fallback) keeps the v1 single-table path driven by the
+    flat ``read_plan``; the detection-fallback header assumption is then
+    surfaced on the plan's notes by the aggregator (issue #10).
+
+    Skip reasons (issue #10):
+
+    * ``"non-tabular"`` — not a tabular candidate (spec §9).
+    * ``"no-table-detected"`` — tabular candidate whose read plan the
+      aggregator withheld (every band judged non-table).
     """
     sheets: list[SheetResultEntry] = []
     warnings: list[str] = list(profile.open_errors)
     for sp in profile.sheets:
         if not sp.is_tabular_candidate or sp.read_plan is None:
+            reason = (
+                "non-tabular" if not sp.is_tabular_candidate
+                else "no-table-detected"
+            )
             sheets.append(SheetResultEntry(
                 name=sp.name, is_visible=sp.is_visible, tables=[],
-                skipped=True, skip_reason="non-tabular"))
+                skipped=True, skip_reason=reason))
             continue
         tables: list[TableResult] = []
         if sp.blocks:
