@@ -197,3 +197,137 @@ def test_sheet_level_headerless_plan_unchanged() -> None:
     assert plan.header is None
     assert plan.skiprows == []
     assert plan.nrows is None
+
+
+# ---------------------------------------------------------------------------
+# Task 4 – BlockAnalyzer specificity chain + headerless block creation [D7]
+# ---------------------------------------------------------------------------
+
+from excel_inspector import inspect
+
+
+def test_block_int_override_beats_sheet_int_for_same_band(fixture_path) -> None:
+    """Sheet header_row=8 and a block override both target band [7..10];
+    the block override (header_row=7) wins, with a conflict warning."""
+
+    opts = InspectionOptions(
+        sheet_overrides={
+            "Sheet1": SheetOverride(
+                header_row=8,
+                block_overrides={9: BlockOverride(header_row=7)},
+            )
+        }
+    )
+    profile = inspect(fixture_path("multi_table_stacked"), opts)
+    sheet = profile.sheets[0]
+    b1, b2 = sheet.blocks
+    assert b1.header_provenance == "heuristic"  # band 1 untouched
+    assert b2.header_row == 7
+    assert b2.header_provenance == "manual"
+    assert any(
+        "the block override wins" in w for w in profile.open_errors
+    )
+
+
+def test_block_headerless_override_creates_manual_band_block(fixture_path) -> None:
+    """BlockOverride(header_row=None) on band [7..10]: the band becomes a
+    manual headerless block spanning the whole band."""
+
+    opts = InspectionOptions(
+        sheet_overrides={
+            "Sheet1": SheetOverride(
+                block_overrides={8: BlockOverride(header_row=None)}
+            )
+        }
+    )
+    sheet = inspect(fixture_path("multi_table_stacked"), opts).sheets[0]
+    assert len(sheet.blocks) == 2
+    b2 = sheet.blocks[1]
+    assert b2.header_row is None
+    assert b2.header_provenance == "manual"
+    assert b2.header_confidence == 1.0
+    assert (b2.data_start_row, b2.data_end_row) == (7, 10)
+    assert (b2.data_left_col, b2.data_right_col) == (None, None)
+    assert b2.columns == []
+    # [D7] declared-headerless plan shape (Task 3).
+    assert b2.read_plan is not None
+    assert b2.read_plan.header is None
+    assert b2.read_plan.skiprows == list(range(6))  # rows 1-6 absorbed
+    assert b2.read_plan.nrows == 4
+
+
+def test_sheet_headerless_plus_block_overrides_block_channel_wins(
+    fixture_path,
+) -> None:
+    """Sheet-wide header_row=None + block_overrides: contradiction warned,
+    per-band analysis proceeds (band 1 heuristic, band 2 headerless)."""
+
+    opts = InspectionOptions(
+        sheet_overrides={
+            "Sheet1": SheetOverride(
+                header_row=None,
+                block_overrides={7: BlockOverride(header_row=None)},
+            )
+        }
+    )
+    profile = inspect(fixture_path("multi_table_stacked"), opts)
+    sheet = profile.sheets[0]
+    assert len(sheet.blocks) == 2
+    assert sheet.blocks[0].header_provenance == "heuristic"
+    assert sheet.blocks[1].header_row is None
+    assert sheet.blocks[1].header_provenance == "manual"
+    assert any("contradicts block_overrides" in w for w in profile.open_errors)
+
+
+def test_sheet_headerless_without_block_overrides_unchanged(fixture_path) -> None:
+    """Without block_overrides the sheet-wide headerless gate is intact
+    (guard 4): no per-band analysis, no blocks."""
+
+    opts = InspectionOptions(
+        sheet_overrides={"Sheet1": SheetOverride(header_row=None)}
+    )
+    sheet = inspect(fixture_path("multi_table_stacked"), opts).sheets[0]
+    assert sheet.blocks == []
+
+
+def test_block_overrides_on_single_band_sheet_warn_and_ignore(
+    fixture_path,
+) -> None:
+    """header_simple is single-band: block_overrides are ignored with a
+    pointer to the sheet-level channel; the mirror block is untouched."""
+
+    opts = InspectionOptions(
+        sheet_overrides={
+            "Sheet1": SheetOverride(
+                block_overrides={1: BlockOverride(header_row=None)}
+            )
+        }
+    )
+    profile = inspect(fixture_path("header_simple"), opts)
+    sheet = profile.sheets[0]
+    assert len(sheet.blocks) == 1
+    assert sheet.blocks[0].header_row == 1  # heuristic mirror intact
+    assert any(
+        "single-band sheet" in w and "sheet-level SheetOverride" in w
+        for w in profile.open_errors
+    )
+
+
+def test_resolver_warnings_surface_through_inspect(fixture_path) -> None:
+    """An anchor in the blank separator (row 5) surfaces its warning."""
+
+    opts = InspectionOptions(
+        sheet_overrides={
+            "Sheet1": SheetOverride(
+                block_overrides={5: BlockOverride(header_row=None)}
+            )
+        }
+    )
+    profile = inspect(fixture_path("multi_table_stacked"), opts)
+    sheet = profile.sheets[0]
+    assert len(sheet.blocks) == 2  # both bands fall back to the heuristic
+    assert all(b.header_provenance == "heuristic" for b in sheet.blocks)
+    assert any(
+        "anchor row 5" in w and "no detected table band" in w
+        for w in profile.open_errors
+    )

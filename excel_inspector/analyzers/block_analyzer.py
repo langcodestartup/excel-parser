@@ -34,7 +34,10 @@ Judgments and conventions (plan v2 §4 Task 10.2):
   ``skip_rows_add`` are **absolute 1-based sheet coordinates** and apply only
   to the block whose band contains the row. An explicit *headerless* override
   (``header_row=None``) is a sheet-wide declaration: per-band analysis is
-  skipped entirely and the v1 headerless flat path is preserved.
+  skipped entirely and the v1 headerless flat path is preserved. [D7]
+  exception: when ``block_overrides`` are also present, the more-specific
+  block channel wins — the contradiction is warned and per-band analysis
+  proceeds.
 * **Guard 6 (warning order)** — warnings accumulate sheet order first, then
   band top-down within a sheet (deterministic JSON ``warnings``).
 * **Mirror rule** — when blocks exist, the sheet's flat header/boundary/column
@@ -55,11 +58,12 @@ final) and before the Merge Analyzer / Plan Aggregator.
 from __future__ import annotations
 
 from ..context import InspectionContext
-from ..models import SheetOverride, SheetProfile, TableBlock
+from ..models import BlockOverride, SheetOverride, SheetProfile, TableBlock
 from ..options import (
     get_header_confidence_threshold,
     get_sheet_override,
     has_header_override,
+    resolve_block_overrides,
 )
 from ..pipeline import Analyzer
 from .block_segmenter import RowBand, _suspected_block_warning
@@ -105,16 +109,39 @@ class BlockAnalyzer(Analyzer):
             # Guard 4: an explicit headerless declaration (header_row=None
             # override) is sheet-wide — there is no per-block header to
             # anchor on, so the v1 headerless flat path stays authoritative
-            # and no block is produced.
+            # and no block is produced. [D7] exception: when the more
+            # specific block channel is also present it wins — the
+            # contradiction is warned and per-band analysis proceeds.
             override = get_sheet_override(context.options, profile.name)
+            block_override_map = (
+                override.block_overrides if override is not None else {}
+            )
             if (
                 override is not None
                 and override.header_row_set
                 and override.header_row is None
             ):
-                continue
+                if not block_override_map:
+                    continue
+                context.add_warning(
+                    f"block_analyzer: sheet {profile.name!r}: sheet-wide "
+                    f"headerless override (header_row=None) contradicts "
+                    f"block_overrides; the block channel wins and per-band "
+                    f"analysis proceeds [D7]"
+                )
 
             if len(bands) == 1:
+                # [D7] the block channel presupposes multi-band analysis;
+                # a single-band sheet is fully covered by the sheet-level
+                # channel, and routing block overrides into the mirror path
+                # would break the mirror-plan == flat-plan invariant.
+                if block_override_map:
+                    context.add_warning(
+                        f"block_analyzer: sheet {profile.name!r}: "
+                        f"block_overrides ignored on a single-band sheet; "
+                        f"use the sheet-level SheetOverride channel instead "
+                        f"[D7]"
+                    )
                 block = self._mirror_block(profile, bands[0])
                 if block is not None:
                     profile.blocks = [block]
@@ -145,10 +172,43 @@ class BlockAnalyzer(Analyzer):
                     f"table band; ignored"
                 )
 
+            # [D7] anchor-keyed block overrides: resolution + conflict
+            # warnings are the resolver's job; guard 6 ordering holds (the
+            # warnings are sheet-scoped and precede the band loop).
+            resolved, override_warnings = resolve_block_overrides(
+                context.options, profile.name, bands
+            )
+            for warning in override_warnings:
+                context.add_warning(warning)
+
+            # [D7] specificity: a sheet-level int header_row and a block
+            # override claiming the same band — the block override wins.
+            if (
+                override is not None
+                and override.header_row_set
+                and isinstance(override.header_row, int)
+            ):
+                for band in bands:
+                    if (
+                        band.start_row <= override.header_row <= band.end_row
+                        and band.start_row in resolved
+                    ):
+                        context.add_warning(
+                            f"block_analyzer: sheet {profile.name!r}: "
+                            f"sheet-level header_row {override.header_row} "
+                            f"and a block override both target band rows "
+                            f"{band.start_row}-{band.end_row}; the block "
+                            f"override wins [D7]"
+                        )
+
             blocks: list[TableBlock] = []
             for band in bands:
                 block = self._analyze_band(
-                    context, profile, band, block_index=len(blocks)
+                    context,
+                    profile,
+                    band,
+                    block_index=len(blocks),
+                    block_override=resolved.get(band.start_row),
                 )
                 if block is not None:
                     blocks.append(block)
@@ -205,6 +265,7 @@ class BlockAnalyzer(Analyzer):
         profile: SheetProfile,
         band: RowBand,
         block_index: int,
+        block_override: BlockOverride | None = None,
     ) -> TableBlock | None:
         """Run Header→Boundary→Type for one band and judge it (plan v2 §4).
 
@@ -225,6 +286,11 @@ class BlockAnalyzer(Analyzer):
             profile: The sheet being analyzed.
             band: The band to analyze (1-based inclusive [D1]).
             block_index: The 0-based index this block will take in ``blocks``.
+            block_override: The band's resolved [D7] block override (already
+                validated by ``options.resolve_block_overrides``), or
+                ``None``. A headerless declaration short-circuits the whole
+                Header→Boundary→Type loop; an int header beats the
+                sheet-level channel.
 
         Returns:
             The band's :class:`TableBlock`, or ``None`` when the band is not
@@ -235,9 +301,45 @@ class BlockAnalyzer(Analyzer):
         threshold = get_header_confidence_threshold(context.options)
         override = get_sheet_override(context.options, profile.name)
 
+        # [D7] block-scoped headerless declaration: the band's blank-run
+        # boundaries ARE the data region; header/boundary/type analysis is
+        # skipped (conservative — same contract as the sheet-level
+        # headerless path: columns stay unprofiled, the aggregator attaches
+        # the headerless note) and the manual declaration is never judged
+        # not-a-table. data_left/right_col stay None (full width): the
+        # column span is undetected, a documented limitation. The
+        # header_row=None + provenance="manual" pair on the returned block
+        # is the exact discriminator build_block_read_plan keys the
+        # declared-headerless plan path on — this constructor is its sole
+        # intended producer.
+        if block_override is not None and block_override.header_row is None:
+            return TableBlock(
+                block_index=block_index,
+                band_start_row=band.start_row,
+                band_end_row=band.end_row,
+                header_row=None,
+                header_confidence=1.0,
+                header_provenance="manual",
+                data_start_row=band.start_row,
+                data_end_row=band.end_row,
+                data_left_col=None,
+                data_right_col=None,
+                skip_rows=self._fold_skip_overrides(override, band, []),
+                columns=[],
+                read_plan=None,
+                subtotal_skip_labels={},
+            )
+
         header_row: int | None
         below_threshold = False
-        if (
+        if block_override is not None:
+            # [D7] block-scoped manual header; the resolver validated that
+            # the row sits inside this band. Beats the sheet-level channel.
+            assert isinstance(block_override.header_row, int)
+            header_row = block_override.header_row
+            confidence = 1.0
+            provenance = "manual"
+        elif (
             has_header_override(context.options, profile.name)
             and override is not None
             and isinstance(override.header_row, int)
