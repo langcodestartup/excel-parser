@@ -242,7 +242,10 @@ def _score_row(
     # (n_below / HEADER_LOOKAHEAD_ROWS). A shrunken window is trivially
     # self-consistent — a single row below yields 1.0 per column — which
     # handed bottom-of-sample data rows a free type-consistency win over the
-    # true header in small mixed-type tables (spec §7.1).
+    # true header in small mixed-type tables (spec §7.1). Only consistency is
+    # scaled: with one below row it is vacuous (a lone cell is always its own
+    # dominant category), whereas distinctness still makes a real candidate-vs-
+    # below comparison from a single row, so it keeps its full weight as-is.
     evidence = len(below) / HEADER_LOOKAHEAD_ROWS
 
     return (
