@@ -42,12 +42,13 @@ print(result.warnings)                     # workbook-level advisories
 Overrides work exactly as with `inspect()`:
 
 ```python
-from excel_inspector import InspectionOptions, SheetOverride, extract
+from excel_inspector import BlockOverride, InspectionOptions, SheetOverride, extract
 
 options = InspectionOptions(
     sheet_overrides={
         "Sheet1": SheetOverride(header_row=4, dtype_force={"0": "string"}),
         "RawDump": SheetOverride(header_row=None),   # declare headerless
+        "Stacked": SheetOverride(block_overrides={19: BlockOverride(header_row=None)}),   # band containing row 19 -> headerless [D7]
     }
 )
 result = extract("book.xlsx", options)

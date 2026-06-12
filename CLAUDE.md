@@ -41,7 +41,7 @@ There is no linter/formatter configured.
 
 ## Authoritative docs
 
-`docs/excel-structure-inspector-spec.md` (spec, Korean), plus the v1 and v2 implementation plans in `docs/`. Code comments cite these constantly as `spec §N` and decision IDs `[D1]`–`[D6]` (defined in the spec's §0 revision-history table). When changing behavior, check the cited section first — the spec is the contract, and tests pin it.
+`docs/excel-structure-inspector-spec.md` (spec, Korean), plus the v1 and v2 implementation plans in `docs/`. Code comments cite these constantly as `spec §N` and decision IDs `[D1]`–`[D7]` (defined in the spec's §0 revision-history table). When changing behavior, check the cited section first — the spec is the contract, and tests pin it.
 
 ## Architecture
 
