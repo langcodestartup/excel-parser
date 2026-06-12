@@ -1,7 +1,7 @@
 # 블록 단위 오버라이드 채널 설계 [D7] (issue #9)
 
 - 날짜: 2026-06-12
-- 상태: 사용자 승인 대기
+- 상태: 승인됨 (2026-06-12), 구현 계획 docs/superpowers/plans/2026-06-12-block-override.md
 - 관련: issue #9, spec §5.0 [D2], §4.8 [D1], §6, §8; plan v2 §4 guard 4
 - 선행 검토: issue #9 재현 완료 (아래 §1)
 

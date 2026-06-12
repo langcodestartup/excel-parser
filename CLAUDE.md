@@ -83,6 +83,8 @@ Open failures are disambiguated by sniffing the OLE2 magic: encrypted container 
 
 `InspectionOptions.sheet_overrides` carries per-sheet `SheetOverride`s. Every estimated field records `provenance` (`"heuristic"`/`"manual"`/`"default"`); an overridden field skips heuristic computation and gets `provenance="manual", confidence=1.0`. `SheetOverride.header_row` uses an `_UNSET` sentinel to distinguish three states: unspecified (defer to heuristic), `int` (forced row), and explicit `None` (declared headerless) — check via `header_row_set` / `options.py:has_header_override()`, never by the value alone.
 
+Block-level channel [D7] (issue #9): `SheetOverride.block_overrides: dict[int, BlockOverride]` anchors a per-band override by any 1-based row inside the target band; `BlockOverride(header_row=None)` declares one band headerless (data region = whole band, profiling skipped) without collapsing the sheet, and conflicts resolve by specificity (block > sheet > heuristic) with warnings, never exceptions. Resolution lives in `options.resolve_block_overrides`; its warnings deliberately use the `block_override:` prefix (channel name, not emitting module).
+
 ### Heuristics [D4] (`heuristics.py`)
 
 All scoring weights, sample sizes, and thresholds are fixed v1 constants calibrated against the fixture corpus (header scan scoring, `BLANK_RUN=2` block separation, density/keyword subtotal detection including Korean keywords 합계/소계/총계/계, type-inference sampling). Don't tune them without updating the fixture-pinned tests.
