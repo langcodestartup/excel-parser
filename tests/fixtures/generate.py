@@ -279,6 +279,18 @@ FIXTURES: dict[str, FixtureSpec] = {
         "expected True. Pins the density-rule margin so the threshold cannot "
         "be raised past 0.583 without a red test (issue #3).",
     ),
+    "memo_scattered": FixtureSpec(
+        "memo_scattered.xlsx",
+        True,
+        "Single-sheet multi-band memo '메모' (issue #10). Three one-line text "
+        "fragments at rows 1/4/7 over columns A-B, separated by two blank "
+        "rows (BLANK_RUN) -> three single-row bands. Density sample: "
+        "populated_cols=2, populated_rows=3, filled=6, density=1.0 -> "
+        "is_tabular_candidate=True, but every band is judged not a table "
+        "(no data rows resolve below each candidate header), so blocks=[]. "
+        "Expected: v1 read_plan=None plus an 'all bands judged non-table' "
+        "warning; v2 entry skipped with skip_reason='no-table-detected'.",
+    ),
     "hidden_sheet": FixtureSpec(
         "hidden_sheet.xlsx",
         True,
@@ -989,6 +1001,29 @@ def build_sparse_real_table() -> bytes:
     return _save_bytes(wb)
 
 
+def build_memo_scattered() -> bytes:
+    """Multi-band memo sheet where every band is judged non-table (issue #10).
+
+    Three one-line text fragments separated by >=2 blank rows (``BLANK_RUN``)
+    form three single-row bands; no band has data rows below its candidate
+    header, so the Block Analyzer rejects all of them (``blocks=[]``). The
+    density heuristic still judges the sheet a tabular candidate (2 populated
+    columns, density 1.0) — exactly the v1/v2 disagreement window issue #10
+    pins: the sheet must NOT silently load through the flat fallback plan.
+    """
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "메모"
+    ws["A1"] = "메모: 분기 보고 전 검토 사항"
+    ws["B1"] = "v2"
+    ws["A4"] = "작성자"
+    ws["B4"] = "김수현"
+    ws["A7"] = "최종 수정"
+    ws["B7"] = "2026-06-01"
+    return _save_bytes(wb)
+
+
 def build_hidden_sheet() -> bytes:
     """Visible + hidden + veryHidden sheets (see ``FIXTURES``).
 
@@ -1473,6 +1508,7 @@ BUILDERS: dict[str, Callable[[], bytes]] = {
     "cover_offset": build_cover_offset,
     "cover_sparse": build_cover_sparse,
     "sparse_real_table": build_sparse_real_table,
+    "memo_scattered": build_memo_scattered,
     "hidden_sheet": build_hidden_sheet,
     "blank_run_terminates": build_blank_run_terminates,
     "interior_blank": build_interior_blank,

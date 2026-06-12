@@ -245,6 +245,62 @@ def test_extract_headerless_override_notes_dtype_skip(fixture_path) -> None:
     )
 
 
+def test_extract_memo_scattered_skipped_no_table_detected(fixture_path) -> None:
+    """issue #10: 전 밴드 non-table 판정 시트는 v2에서도 skip된다.
+
+    BlockAnalyzer가 모든 밴드를 거부한 시트(blocks=[])가 flat 폴백 plan으로
+    T1을 만들면 v1("테이블 없음")과 모순되고, "band judged not a table
+    (skipped)" 경고와도 모순된다. skip_reason은 비표 판정("non-tabular")과
+    구분되는 "no-table-detected".
+    """
+    wr = extract(fixture_path("memo_scattered"))
+    (entry,) = wr.sheets
+    assert entry.skipped is True
+    assert entry.tables == []
+    assert entry.skip_reason == "no-table-detected"
+
+
+def test_extract_needs_manual_header_fallback_noted(fixture_path) -> None:
+    """issue #10: needs-manual 시트의 폴백 T1은 헤더 가정을 notes로 표면화.
+
+    no_header(무오버라이드)는 실데이터 표(비문자열 헤더 등, P9 HIGH)와 메모
+    시트를 파이프라인 시그널로 구분할 수 없는 케이스 — skip하면 진짜 표가
+    유실되므로 적재는 유지하되, "첫 행을 헤더로 가정했다"는 사실을
+    plan/TableResult notes로 알린다 (spec §8 no silent loss; skip이 아니라
+    경고 표면화를 택한 설계 근거는 issue #10 코멘트 참조).
+    """
+    wr = extract(fixture_path("no_header"))
+    (entry,) = wr.sheets
+    assert entry.skipped is False
+    (table,) = entry.tables
+    assert table.header_row is None and table.header_confidence == 0.0
+    assert any("first row assumed as header" in n for n in table.notes)
+
+
+def test_v1_blocks_v2_tables_consistent_across_corpus(openable_fixture) -> None:
+    """issue #10 핵심 불변식: blocks==[] 시트의 v2 결과는 v1 판정과 모순 금지.
+
+    (1) aggregator가 plan을 보류한 시트(read_plan=None)는 skip + 테이블 0개,
+    (2) 그래도 적재되는 blocks==[] 폴백 테이블은 반드시 헤더 가정을 notes로
+    표면화한다 — 조용한 폴백 적재 금지 (무오버라이드 검사 기준).
+    """
+    from excel_inspector import inspect as _inspect
+    profile = _inspect(openable_fixture)
+    wr = extract(openable_fixture)
+    entries = {e.name: e for e in wr.sheets}
+    for sp in profile.sheets:
+        entry = entries[sp.name]
+        if sp.read_plan is None:
+            assert entry.skipped is True and entry.tables == []
+            continue
+        if sp.blocks:
+            continue
+        for table in entry.tables:
+            assert any(
+                "first row assumed as header" in n for n in table.notes
+            )
+
+
 def test_extract_surfaces_excluded_subtotal_rows_in_notes(fixture_path) -> None:
     """Issue #2: excluded subtotal/total rows must surface in notes (No silent loss).
 

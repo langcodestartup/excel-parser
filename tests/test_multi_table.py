@@ -290,6 +290,44 @@ def test_headerless_override_sheet_has_no_blocks(fixture_path) -> None:
     ]
 
 
+def test_all_bands_rejected_sheet_has_no_read_plan(fixture_path) -> None:
+    """issue #10: every band judged non-table -> no flat fallback plan.
+
+    memo_scattered is a tabular *candidate* whose three bands are all
+    rejected by the Block Analyzer. The flat fallback plan must NOT survive
+    (it would load rows the per-band warnings declared "skipped"); the
+    exclusion is surfaced as a warning instead (spec §8, no silent loss).
+    """
+
+    profile = inspect(fixture_path("memo_scattered"))
+    (sheet,) = profile.sheets
+    assert sheet.is_tabular_candidate is True
+    assert sheet.blocks == []
+    assert sheet.read_plan is None
+    assert any(
+        "judged non-table" in w and "no read plan" in w
+        for w in profile.open_errors
+    )
+
+
+def test_all_bands_rejected_is_tabular_override_forces_plan(
+    fixture_path,
+) -> None:
+    """issue #10: a manual is_tabular=True override keeps the fallback plan.
+
+    The override channel stays authoritative [D2]: when the caller declares
+    the sheet tabular, the all-bands-rejected exclusion must not fire and
+    the v1 flat fallback plan loads as before.
+    """
+
+    opts = InspectionOptions(
+        sheet_overrides={"메모": SheetOverride(is_tabular=True)}
+    )
+    sheet = inspect(fixture_path("memo_scattered"), opts).sheets[0]
+    assert sheet.blocks == []
+    assert sheet.read_plan is not None
+
+
 # ---------------------------------------------------------------------------
 # Guard 4 — absolute-coordinate overrides target only the containing block
 # ---------------------------------------------------------------------------

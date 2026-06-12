@@ -115,6 +115,13 @@ survive); numpy scalars -> native Python; headerless columns -> `col_0..col_n`;
 duplicate column names -> `.1`/`.2` suffixes; multi-level headers flatten to
 `"상위 / 하위"`.
 
+`skip_reason` values: `"non-tabular"` (not a tabular candidate, spec §9) and
+`"no-table-detected"` (tabular candidate, but every detected band was judged
+non-table — issue #10; a `header_row` or `is_tabular` override forces
+loading). A sheet whose header heuristic failed still loads via the v1
+fallback (first row assumed as header) and carries that assumption in the
+table's `notes` instead of being skipped.
+
 ## Lower-level API — `inspect()` + `load_dataframe()` (v1)
 
 `inspect()` returns a `WorkbookProfile` whose per-sheet `read_plan` (a
