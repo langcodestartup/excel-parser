@@ -398,6 +398,65 @@ def test_extract_small_mixed_table_detects_true_header(tmp_path) -> None:
     ]
 
 
+def test_extract_datetime_dtype_outlier_does_not_abort_workbook(tmp_path) -> None:
+    """Issue #18: a date-like column with one text outlier still extracts.
+
+    The inspector may legitimately infer ``date`` at the 95% threshold, but
+    pandas rejects a forced ``datetime64[ns]`` dtype when the loaded column
+    contains a real-world marker like "미정". ``extract()`` must recover at the
+    table boundary, surface the fallback, and continue to later sheets.
+    """
+
+    from openpyxl import Workbook
+
+    from excel_inspector import inspect as _inspect
+
+    wb = Workbook()
+    bad = wb.active
+    bad.title = "d"
+    bad.cell(1, 1, "날짜")
+    bad.cell(1, 2, "값")
+    for row in range(2, 22):
+        bad.cell(row, 1, dt.datetime(2000 + row, 1, 1))
+        bad.cell(row, 2, (row - 1) * 10)
+    bad.cell(22, 1, "미정")
+    bad.cell(22, 2, 999)
+
+    ok = wb.create_sheet("ok")
+    ok.append(["name", "qty"])
+    ok.append(["alpha", 1])
+    ok.append(["beta", 2])
+
+    path = tmp_path / "issue18_date_outlier.xlsx"
+    wb.save(path)
+
+    inspected = _inspect(path)
+    date_sheet = inspected.sheets[0]
+    assert date_sheet.columns[0].inferred_type == "date"
+    assert date_sheet.read_plan is not None
+    assert date_sheet.read_plan.dtype_map == {"0": "datetime64[ns]"}
+
+    wr = extract(path)
+    bad_entry, ok_entry = wr.sheets
+    assert bad_entry.skipped is False
+    assert len(bad_entry.tables) == 1
+    bad_table = bad_entry.tables[0]
+    assert len(bad_table.dataframe) == 21
+    assert bad_table.dataframe.iloc[-1]["날짜"] == "미정"
+    assert any("load dtype fallback" in note for note in bad_table.notes)
+    assert any(
+        "d!T1" in warning and "datetime64[ns]" in warning
+        for warning in wr.warnings
+    )
+
+    assert ok_entry.skipped is False
+    assert len(ok_entry.tables) == 1
+    assert ok_entry.tables[0].to_dict()["records"] == [
+        {"name": "alpha", "qty": 1},
+        {"name": "beta", "qty": 2},
+    ]
+
+
 def test_extract_no_rows_above_note_across_bands(fixture_path) -> None:
     """A lower block's leading rows live in *other* bands -> no false note.
 
