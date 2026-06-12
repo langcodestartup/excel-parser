@@ -166,6 +166,29 @@ FIXTURES: dict[str, FixtureSpec] = {
         "('007'), proving the positional dtype_map key stays position-valid "
         "under header=list (pandas 3.0.3, measured).",
     ),
+    "titled_multi_level": FixtureSpec(
+        "titled_multi_level.xlsx",
+        True,
+        "Sheet 'Sheet1'. [Issue #7 regression] A merged title banner A1:H1 "
+        "('2026년 상반기 지역별 매출 실적 보고서') above a blank row 2 and a "
+        "two-level header band rows 3-4: vertical merges A3:A4 ('지역') and "
+        "B3:B4 ('제품코드'), group merges C3:E3 ('1분기') and F3:H3 "
+        "('2분기'), leaf labels C4..H4 ('1월'..'6월'). Data rows 5-6, "
+        "columns A-H; column B holds digit strings '00123'/'00789' "
+        "(numeric_text, leading zeros must survive). header_row resolves to "
+        "4 and every merge with min_row <= 4 classifies kind='header' — "
+        "including the title — so the merged-header row set {1, 3} is "
+        "non-contiguous. Expected plan (issue #7 fix): the maximal "
+        "contiguous run ending at the leaf (rows 3-4) survives as "
+        "header=[2, 3] (0-based absolute [D1]); the disconnected title row "
+        "[1] is excluded from the band with a visible warning (spec §8 no "
+        "silent loss) instead of vetoing the whole band into leaf-only "
+        "'Unnamed: N' loading. Loaded columns flatten to ['지역','제품코드',"
+        "'1분기 / 1월','1분기 / 2월','1분기 / 3월','2분기 / 4월',"
+        "'2분기 / 5월','2분기 / 6월'] (vertical-merge anchors fill the "
+        "group level; empty leaf cells drop from the join), and records "
+        "keys == columns[].resolved_name positionally.",
+    ),
     "stacked_multi_level": FixtureSpec(
         "stacked_multi_level.xlsx",
         True,
@@ -668,6 +691,35 @@ def build_multi_level_numeric_text() -> bytes:
             ["007", 1, 1000, 1000],  # row 3
             ["012", 4, 500, 2000],  # row 4
             ["034", 7, 200, 1400],  # row 5
+        ],
+    )
+    return _save_bytes(wb)
+
+
+def build_titled_multi_level() -> bytes:
+    """Merged title banner above a two-level header band (issue #7)."""
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "2026년 상반기 지역별 매출 실적 보고서"
+    ws.merge_cells("A1:H1")
+    ws["A3"] = "지역"
+    ws.merge_cells("A3:A4")
+    ws["B3"] = "제품코드"
+    ws.merge_cells("B3:B4")
+    ws["C3"] = "1분기"
+    ws.merge_cells("C3:E3")
+    ws["F3"] = "2분기"
+    ws.merge_cells("F3:H3")
+    _write_rows(
+        ws,
+        4,
+        [
+            # Row 4 leaves; A4/B4 stay covered by the vertical merges above.
+            [None, None, "1월", "2월", "3월", "4월", "5월", "6월"],
+            ["서울", "00123", 120, 135, 150, 142, 138, 160],  # row 5
+            ["부산", "00789", 60, 65, 70, 72, 68, 75],  # row 6
         ],
     )
     return _save_bytes(wb)
@@ -1325,6 +1377,7 @@ BUILDERS: dict[str, Callable[[], bytes]] = {
     "merged_header": build_merged_header,
     "multi_level_header": build_multi_level_header,
     "multi_level_numeric_text": build_multi_level_numeric_text,
+    "titled_multi_level": build_titled_multi_level,
     "stacked_multi_level": build_stacked_multi_level,
     "types_mixed": build_types_mixed,
     "left_margin_cols": build_left_margin_cols,

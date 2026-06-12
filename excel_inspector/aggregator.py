@@ -314,26 +314,31 @@ def _multi_level_header_rows(
 ) -> list[int] | None:
     """Derive the contiguous multi-level header band (plan v2 Task 11.2) [D6].
 
-    Returns the **1-based** rows of the full header band — the merged group
-    rows above the leaf header plus the leaf ``header_row`` itself — when, and
-    only when, every row strictly between the band top and the leaf header is
-    covered by at least one ``kind="header"`` merge (the "헤더 위 병합 행이
-    헤더 행과 연속" condition). The caller converts the band to the 0-based
-    ``ReadPlan.header`` list [D1].
+    Returns the **1-based** rows of the full header band — the maximal
+    contiguous run of ``kind="header"``-merged rows ending at
+    ``header_row - 1``, plus the leaf ``header_row`` itself (the "헤더 위
+    병합 행이 헤더 행과 연속" condition, applied as a suffix). The caller
+    converts the band to the 0-based ``ReadPlan.header`` list [D1].
 
-    Conservative fallbacks (plan v2 Task 11.2 Step 1):
+    Conservative fallbacks (plan v2 Task 11.2 Step 1; issue #7):
 
     * No header merge strictly above the leaf header (e.g. a band-scoped
       block whose band merges were all classified ``body``) -> ``None``,
       silently — there is simply no multi-level evidence in this scope.
-    * Merged rows above the header exist but do **not** form a contiguous run
-      ending at ``header_row - 1`` -> ``None`` plus a warning; the sheet
-      loads with the single leaf header.
+    * Merged rows above the header exist but none touches ``header_row - 1``
+      -> ``None`` plus a warning; the sheet loads with the single leaf
+      header.
+    * Merged rows disconnected from that contiguous run (typically a merged
+      title banner above the band, issue #7) are excluded from the band with
+      a warning (spec §8 no silent loss) — NOT the previous all-or-nothing
+      veto, which dropped the whole band and broke the vertical-merge anchor
+      names into pandas ``Unnamed: N`` labels.
 
     Args:
         profile: Sheet (or synthetic block) profile with the final
             ``header_row`` and classified ``merges``.
-        warnings: Optional accumulator for the non-contiguous notice.
+        warnings: Optional accumulator for the non-contiguous / excluded-row
+            notices.
 
     Returns:
         The 1-based band rows (ascending, ending at ``header_row``), or
@@ -360,8 +365,12 @@ def _multi_level_header_rows(
 
     if not rows_above:
         return None
-    band_top = min(rows_above)
-    if rows_above != set(range(band_top, header_row)):
+    band_top = header_row
+    while band_top - 1 in rows_above:
+        band_top -= 1
+    if band_top == header_row:
+        # No merged row touches the leaf (e.g. merged row 1, bare row 2,
+        # leaf row 3): no usable band at all -> single leaf header.
         if warnings is not None:
             warnings.append(
                 f"sheet '{profile.name}': multi-level header band above row "
@@ -370,6 +379,14 @@ def _multi_level_header_rows(
                 f"row (conservative)"
             )
         return None
+    disconnected = sorted(row for row in rows_above if row < band_top)
+    if disconnected and warnings is not None:
+        warnings.append(
+            f"sheet '{profile.name}': merged header rows {disconnected} are "
+            f"separated from the contiguous header band (rows "
+            f"{band_top}-{header_row}) and were excluded from the "
+            f"multi-level header (likely a title/banner row; issue #7)"
+        )
     return list(range(band_top, header_row + 1))
 
 
