@@ -136,3 +136,64 @@ def test_resolver_empty_override_warns_and_does_not_claim() -> None:
     assert resolved[7].header_row is None  # anchor 9's override claimed the band
     assert len(warnings) == 1
     assert "no override field specified" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# Task 3 – PlanAggregator declared-headerless conversion path [D7]
+# ---------------------------------------------------------------------------
+
+from excel_inspector.aggregator import build_block_read_plan
+from excel_inspector.models import TableBlock
+from tests.conftest import make_sheet_profile
+
+
+def _headerless_block() -> TableBlock:
+    """A declared-headerless block on band rows 17-21 (design doc §6)."""
+
+    return TableBlock(
+        block_index=2,
+        band_start_row=17,
+        band_end_row=21,
+        header_row=None,
+        header_confidence=1.0,
+        header_provenance="manual",
+        data_start_row=17,
+        data_end_row=21,
+        data_left_col=None,
+        data_right_col=None,
+        skip_rows=[],
+        columns=[],
+        read_plan=None,
+        subtotal_skip_labels={},
+    )
+
+
+def test_declared_headerless_block_plan() -> None:
+    """header=None, rows 1-16 absorbed into skiprows, nrows = band length."""
+
+    profile = make_sheet_profile(name="Sheet1", max_row=21, max_col=3)
+    plan = build_block_read_plan(
+        profile, _headerless_block(), None, None, band_scoped=True
+    )
+    assert plan.header is None
+    assert plan.skiprows == list(range(16))  # 1-based rows 1-16 -> 0-based [D1]
+    assert plan.nrows == 5
+    assert plan.usecols is None
+    assert plan.dtype_map == {}
+    assert "headerless sheet: dtype inference skipped" in plan.notes
+
+
+def test_sheet_level_headerless_plan_unchanged() -> None:
+    """The sheet-level headerless path never sets data_start_row -> no
+    skiprows absorption; the [D7] rule must not disturb it."""
+
+    from excel_inspector.aggregator import build_read_plan
+
+    profile = make_sheet_profile(name="Sheet1", max_row=10, max_col=3)
+    opts = InspectionOptions(
+        sheet_overrides={"Sheet1": SheetOverride(header_row=None)}
+    )
+    plan = build_read_plan(profile, opts, None)
+    assert plan.header is None
+    assert plan.skiprows == []
+    assert plan.nrows is None
