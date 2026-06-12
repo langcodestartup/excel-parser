@@ -31,6 +31,31 @@ HEADER_LOOKAHEAD_ROWS: int = 5
 HEADER_CONFIDENCE_THRESHOLD: float = 0.5
 
 # ---------------------------------------------------------------------------
+# §4.2 Tabular-candidate (non-tabular sheet) detection
+# ---------------------------------------------------------------------------
+
+#: Number of top rows sampled when judging whether a sheet is tabular (spec
+#: §4.2). Matched to ``HEADER_SCAN_ROWS`` so the tabular gate and the header
+#: scan look at the same top-of-sheet window.
+NON_TABULAR_SAMPLE_ROWS: int = 20
+
+#: A sheet whose content sample populates at most this many distinct columns is
+#: non-tabular (a cover / description sheet), regardless of which column the
+#: text starts in (issue #3). The original ``max_col``-only gate was sensitive
+#: to the leftmost empty columns; counting *populated* columns is offset-free.
+MIN_TABULAR_POPULATED_COLS: int = 1
+
+#: When a sheet populates >= 2 columns but its sample cell density
+#: (filled / (populated_cols * populated_rows)) is below this, it is still
+#: treated as non-tabular (a multi-column but scattered cover). Calibrated
+#: against the corpus: the lowest density among regression-pinned corpus tables
+#: is 0.688 (stacked_uneven_width); a lower 0.648 occurs in the demo-only sheet
+#: 지역별매출 (complex_demo.xlsx, not test-pinned), so the narrowest known margin
+#: above this threshold is 0.148. The ``sparse_real_table`` fixture (density
+#: 0.583) pins that margin in the test suite so the threshold cannot creep up.
+NON_TABULAR_DENSITY_THRESHOLD: float = 0.5
+
+# ---------------------------------------------------------------------------
 # §7.2 Boundary detection rules
 # ---------------------------------------------------------------------------
 

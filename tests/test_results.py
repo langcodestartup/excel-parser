@@ -544,3 +544,23 @@ def test_extract_every_openable_fixture_serializes(openable_fixture: Path) -> No
             }
             assert tbl["row_count"] == len(tbl["records"])
     assert isinstance(wr.to_markdown(), str)
+
+
+def test_offset_cover_sheet_skipped_not_empty_table(fixture_path) -> None:
+    """issue #3: B열에서 시작하는 표지는 columns=[] 빈 테이블이 아니라 skip."""
+
+    wr = extract(fixture_path("cover_offset"))
+    assert [s.name for s in wr.sheets] == ["표지"]
+    cover = wr.sheets[0]
+    assert cover.skipped is True
+    assert cover.skip_reason == "non-tabular"
+    assert cover.tables == []
+
+
+def test_sparse_cover_sheet_skipped(fixture_path) -> None:
+    """issue #3: 다중 열이지만 희소한 표지도 skip(non-tabular)으로 끝난다."""
+
+    wr = extract(fixture_path("cover_sparse"))
+    cover = wr.sheets[0]
+    assert cover.skipped is True and cover.skip_reason == "non-tabular"
+    assert cover.tables == []
