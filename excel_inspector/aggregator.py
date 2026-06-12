@@ -169,6 +169,8 @@ def build_read_plan(
     profile: SheetProfile,
     options: InspectionOptions | None = None,
     warnings: list[str] | None = None,
+    *,
+    band_start_row: int | None = None,
 ) -> ReadPlan:
     """Build a v1 :class:`ReadPlan` for one sheet (spec §4.8) [D1][D5].
 
@@ -184,6 +186,12 @@ def build_read_plan(
         options: Inspection options for override application [D2].
         warnings: Optional accumulator for non-fatal notices (e.g. a stray
             ``skip_row`` discarded because it sits at/above the header).
+        band_start_row: First row (1-based) of the enclosing row band, when
+            known. A band starts at a non-blank row (Block Segmenter), so a
+            band start above a heuristically detected header proves non-empty
+            rows were absorbed by Rule 1 — surfaced as a "no silent loss"
+            note (spec §8; issue #8). ``None`` (geometry unknown, e.g. a
+            direct v1 call) keeps the plan note-free.
 
     Returns:
         The synthesized :class:`ReadPlan` (0-based coords).
@@ -288,6 +296,13 @@ def build_read_plan(
     # v1 records the recommendations only; acting on them is the loader's job.
     notes = _body_merge_notes(profile) + _formula_notes(profile)
     notes.extend(_excluded_subtotal_notes(profile, interior_skips))
+    # Rows the Rule-1 absorption (or pandas' above-header discard, in the
+    # multi-level case) dropped above a heuristically detected header must
+    # not vanish silently (spec §8; issue #8). A manual header is the
+    # caller's explicit choice — no note (issue #2 precedent).
+    notes.extend(
+        _rows_above_header_notes(profile, band_start_row, multi_header_rows)
+    )
 
     # Headerless visibility (plan v2 Phase 13 Step 2, L6): with an explicit
     # headerless declaration there is no header anchor, so the Boundary
@@ -537,6 +552,63 @@ def _excluded_subtotal_notes(
     return notes
 
 
+#: Prefix of every dropped-rows-above-header note (issue #8; spec §8 "No
+#: silent loss"). Stable so tests and consumers can recognize the advisory
+#: without parsing the whole string.
+_ROWS_ABOVE_HEADER_NOTE_PREFIX = "rows above detected header not loaded: "
+
+
+def _rows_above_header_notes(
+    profile: SheetProfile,
+    band_start_row: int | None,
+    multi_header_rows: list[int] | None,
+) -> list[str]:
+    """Build the "no silent loss" note for rows dropped above the header (issue #8).
+
+    Rule 1 absorbs rows ``1 .. header_row-1`` into ``skiprows`` (and with a
+    multi-level header pandas itself discards everything above the first
+    header row), so content above the detected header never reaches the
+    loaded frame. A band starts at a non-blank row (Block Segmenter), so
+    ``band_start_row < first_header_row`` proves at least one non-empty row
+    was dropped — spec §8 forbids losing it silently.
+
+    No note is produced when:
+
+    * ``band_start_row`` is ``None`` — band geometry unknown (a direct v1
+      :func:`build_read_plan` call); staying silent preserves the v1 plan.
+    * ``header_provenance != "heuristic"`` — a manual header_row override
+      [D2] is the caller's explicit choice (issue #2 precedent), and the
+      detection fallback / headerless paths absorb nothing above a header.
+    * the band starts at (or below) the first header row — nothing dropped.
+
+    Args:
+        profile: The sheet (or synthetic block) profile with the final
+            ``header_row``/``header_provenance``.
+        band_start_row: First row (1-based) of the enclosing band, or ``None``.
+        multi_header_rows: The promoted multi-level header band rows, or
+            ``None`` for a single header. The dropped span ends above
+            ``multi_header_rows[0]`` (the band top), not the leaf header.
+
+    Returns:
+        A single-note list, or an empty list (the note is per-plan, one span).
+    """
+
+    if band_start_row is None or profile.header_provenance != "heuristic":
+        return []
+    first_header = (
+        multi_header_rows[0] if multi_header_rows else profile.header_row
+    )
+    if first_header is None or band_start_row >= first_header:
+        return []
+
+    top, bottom = band_start_row, first_header - 1
+    span = f"sheet row {top}" if top == bottom else f"sheet rows {top}-{bottom}"
+    return [
+        f"{_ROWS_ABOVE_HEADER_NOTE_PREFIX}{span} (header at row "
+        f"{first_header}); use a header_row override if these are data rows"
+    ]
+
+
 def _interior_skip_rows(
     profile: SheetProfile, warnings: list[str] | None
 ) -> list[int]:
@@ -737,7 +809,9 @@ def build_block_read_plan(
         columns=list(block.columns),
         subtotal_skip_labels=dict(block.subtotal_skip_labels),
     )
-    plan = build_read_plan(synthetic, None, warnings)
+    plan = build_read_plan(
+        synthetic, None, warnings, band_start_row=block.band_start_row
+    )
     plan.dtype_map.update(get_dtype_force(options, profile.name))
 
     # Defense line (W-A review HIGH): an unresolved data region must not read
@@ -920,7 +994,15 @@ class PlanAggregator(Analyzer):
                     # Flat mirror: the sheet-level plan is the top-most block's.
                     profile.read_plan = profile.blocks[0].read_plan
                     continue
+            # Band geometry for the no-silent-loss note (issue #8): the flat
+            # plan's enclosing band is the sheet's first (the flat fields
+            # mirror blocks[0]); the mirror block passes the same value, so
+            # the mirror-plan == flat-plan invariant holds.
+            bands = context.row_bands.get(profile.name) or []
             profile.read_plan = build_read_plan(
-                profile, context.options, context.warnings
+                profile,
+                context.options,
+                context.warnings,
+                band_start_row=bands[0].start_row if bands else None,
             )
         return context
