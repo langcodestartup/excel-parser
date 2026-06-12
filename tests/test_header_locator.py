@@ -372,7 +372,12 @@ def test_distinctness_header_vs_data() -> None:
 
 
 def test_score_row_combines_components() -> None:
-    """The composite score equals the §7.1 weighted sum of its parts."""
+    """The composite score equals the §7.1 weighted sum of its parts.
+
+    The consistency term carries the lookahead-evidence factor
+    ``n_below / HEADER_LOOKAHEAD_ROWS`` (issue #8): two observed below rows
+    earn 2/5 of the full consistency weight.
+    """
 
     rows = [
         ["name", "qty", "price"],
@@ -382,7 +387,7 @@ def test_score_row_combines_components() -> None:
     s = _score_row(0, rows, 3)
     expected = (
         0.5 * _non_empty_string_ratio(rows[0], 3)
-        + 0.3 * _type_consistency(rows[1:3], 3)
+        + 0.3 * _type_consistency(rows[1:3], 3) * (2 / 5)
         + 0.2 * _distinctness(rows[0], rows[1:3], 3)
     )
     assert abs(s - expected) < 1e-12
@@ -494,3 +499,65 @@ def test_col_count_window_scoped_uses_band_local_width() -> None:
 
     assert HeaderLocator._col_count(profile, rows) == 8  # v1 whole-sheet
     assert HeaderLocator._col_count(profile, rows, window_scoped=True) == 3
+
+
+# ---------------------------------------------------------------------------
+# Issue #8: lookahead-evidence weighting of type_consistency
+# ---------------------------------------------------------------------------
+
+
+def test_small_mixed_table_prefers_true_header_over_bottom_row() -> None:
+    """Issue #8 regression: a bottom all-string data row must not win.
+
+    Pre-fix, the §7.1 scoring handed row 4 ('거래처수'/'5개사'/'100%') a
+    trivially-perfect type_consistency — its lookahead window held a single
+    row, and one row is always self-consistent — so it outscored the true
+    header at row 1 (whose consistency the genuinely mixed '값' column drags
+    down) and rows 1-3 vanished from the loaded frame. The consistency term
+    now scales with the observed lookahead evidence, so the true header wins.
+    """
+
+    rows = [
+        ["항목", "값", "달성률"],
+        ["총매출", 48300, "92%"],
+        ["총수량", 318, "104%"],
+        ["거래처수", "5개사", "100%"],
+        ["반품건수", 1, "-"],
+    ]
+    scores = [_score_row(i, rows, 3) for i in range(len(rows))]
+    assert max(range(len(scores)), key=scores.__getitem__) == 0
+    assert scores[0] >= 0.5  # still above the manual-header threshold
+
+
+def test_type_consistency_scales_with_lookahead_evidence() -> None:
+    """The consistency weight is earned by evidence, not granted by default.
+
+    Identical candidate and below-row content, differing only in how many
+    below rows exist: a single-row window may claim only 1/5 of the full
+    consistency term, so the score gap is exactly
+    ``0.3 * 1.0 * (1 - 1/5) = 0.24``. Repeating the same below row keeps
+    str_ratio and distinctness identical across both variants, so the gap
+    isolates the evidence factor.
+    """
+
+    candidate = ["name", "qty"]
+    below_row = ["widget", 10]
+    full = [candidate] + [list(below_row) for _ in range(5)]
+    single = [candidate, list(below_row)]
+
+    gap = _score_row(0, full, 2) - _score_row(0, single, 2)
+    assert abs(gap - 0.3 * (1.0 - 1.0 / 5.0)) < 1e-9
+
+
+def test_small_legitimate_table_header_stays_above_threshold() -> None:
+    """Evidence weighting must not sink a legitimate small table's header.
+
+    A 3-row table (header + 2 typed data rows) keeps its header at row 1,
+    comfortably above the 0.5 threshold, even though only 2/5 of the
+    lookahead window exists.
+    """
+
+    rows = [["name", "qty"], ["widget", 10], ["gadget", 5]]
+    scores = [_score_row(i, rows, 2) for i in range(len(rows))]
+    assert max(range(len(scores)), key=scores.__getitem__) == 0
+    assert scores[0] >= 0.5
