@@ -50,6 +50,7 @@ from .exceptions import (
 )
 from .loader import Loader
 from .models import (
+    BlockOverride,
     ColumnProfile,
     InspectionOptions,
     MergeRegion,
@@ -164,6 +165,7 @@ def extract(
 __all__ = [
     "Analyzer",
     "BlockAnalyzer",
+    "BlockOverride",
     "BlockSegmenter",
     "BoundaryDetector",
     "ColumnProfile",
