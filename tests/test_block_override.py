@@ -331,3 +331,88 @@ def test_resolver_warnings_surface_through_inspect(fixture_path) -> None:
         "anchor row 5" in w and "no detected table band" in w
         for w in profile.open_errors
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 5 – stacked_headerless_band fixture + issue #9 E2E golden tests [D7]
+# ---------------------------------------------------------------------------
+
+from excel_inspector import extract
+
+
+def test_headerless_band_skipped_without_override(fixture_path) -> None:
+    """Baseline: the numeric band 17-21 is judged not a table, with a
+    visible warning (no silent loss; the recovery channel is [D7])."""
+
+    path = fixture_path("stacked_headerless_band")
+    wr = extract(path)
+    assert len(wr.tables) == 2
+    assert any(
+        "17-21" in w and "band judged not a table" in w for w in wr.warnings
+    )
+
+
+def test_block_override_recovers_headerless_band(fixture_path) -> None:
+    """The issue #9 scenario end-to-end: anchor 19 declares band [17..21]
+    headerless; all three tables load with no row loss."""
+
+    opts = InspectionOptions(
+        sheet_overrides={
+            "Sheet1": SheetOverride(
+                block_overrides={19: BlockOverride(header_row=None)}
+            )
+        }
+    )
+    path = fixture_path("stacked_headerless_band")
+
+    profile = inspect(path, opts)
+    sheet = profile.sheets[0]
+    assert len(sheet.blocks) == 3
+    b3 = sheet.blocks[2]
+    assert b3.header_row is None and b3.header_provenance == "manual"
+    assert (b3.data_start_row, b3.data_end_row) == (17, 21)
+    assert b3.read_plan is not None
+    assert b3.read_plan.header is None
+    assert b3.read_plan.skiprows == list(range(16))
+    assert b3.read_plan.nrows == 5
+    assert "headerless sheet: dtype inference skipped" in b3.read_plan.notes
+
+    wr = extract(path, options=opts)
+    t1, t2, t3 = wr.tables
+    assert t3.table_id == "Sheet1!T3"
+    assert t3.header_row is None
+    assert list(t3.dataframe.columns) == ["col_0", "col_1", "col_2"]
+    assert len(t3.dataframe) == 5
+    assert list(t3.dataframe["col_0"]) == [1, 2, 3, 4, 5]
+    assert list(t3.dataframe["col_2"]) == [111, 222, 333, 444, 555]
+    # Neighbor blocks untouched.
+    assert list(t1.dataframe.columns) == ["분기", "매출", "비고"]
+    assert len(t1.dataframe) == 4
+    assert list(t2.dataframe.columns) == ["부서", "인원", "예산"]
+    assert len(t2.dataframe) == 6
+
+
+def test_headerless_override_on_top_band_mirrors_to_flat_fields(
+    fixture_path,
+) -> None:
+    """A headerless declaration on the TOP band (blocks[0]) exercises the
+    mirror rule with header_row=None: the flat fields mirror the manual
+    headerless block (code-review recommendation, Task 4)."""
+
+    opts = InspectionOptions(
+        sheet_overrides={
+            "Sheet1": SheetOverride(
+                block_overrides={1: BlockOverride(header_row=None)}
+            )
+        }
+    )
+    path = fixture_path("multi_table_stacked")
+    sheet = inspect(path, opts).sheets[0]
+    assert len(sheet.blocks) == 2
+    b1 = sheet.blocks[0]
+    assert b1.header_row is None and b1.header_provenance == "manual"
+    # Mirror rule: the flat fields reflect the top-most block.
+    assert sheet.header_row is None
+    assert sheet.header_provenance == "manual"
+    assert (sheet.data_start_row, sheet.data_end_row) == (1, 4)
+    assert sheet.read_plan == b1.read_plan

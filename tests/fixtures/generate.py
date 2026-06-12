@@ -381,6 +381,23 @@ FIXTURES: dict[str, FixtureSpec] = {
         "['부서','인원','예산'] with 3 rows, T2 columns "
         "['제품명','단가','재고','비고'] with 3 rows.",
     ),
+    "stacked_headerless_band": FixtureSpec(
+        "stacked_headerless_band.xlsx",
+        True,
+        "Sheet 'Sheet1'. [D7 block override, issue #9] Two headered tables "
+        "stacked above a pure-numeric HEADERLESS band, each separated by a "
+        "BLANK_RUN (2) of empty rows. Table 1: header row 1 (A1:C1 = "
+        "'분기','매출','비고'), data rows 2-5 (4 rows), columns A-C. Blank "
+        "rows 6-7. Table 2: header row 8 (A8:C8 = '부서','인원','예산'), "
+        "data rows 9-14 (6 rows), columns A-C. Blank rows 15-16. Band 3: "
+        "rows 17-21 are 5 pure-numeric rows (no header; values "
+        "[r, r*11, r*111] for r in 1..5). Row bands (1-based, inclusive): "
+        "[1..5], [8..14], [17..21]. max_row=21, max_col=3. Without overrides "
+        "band 3 must be judged not a table (numeric rows score below the "
+        "0.5 header threshold) with a visible warning; with "
+        "BlockOverride(header_row=None) anchored anywhere in 17..21 it must "
+        "load as a 5x3 headerless table (col_0..col_2) with no row loss.",
+    ),
     "stacked_uneven_width": FixtureSpec(
         "stacked_uneven_width.xlsx",
         True,
@@ -1256,6 +1273,57 @@ def build_multi_table_stacked() -> bytes:
     return _save_bytes(wb)
 
 
+def build_stacked_headerless_band() -> bytes:
+    """Two headered tables above a pure-numeric headerless band [D7] (#9).
+
+    Table 1: header row 1, data rows 2-5. Blank rows 6-7. Table 2: header
+    row 8, data rows 9-14. Blank rows 15-16. Band 3: pure-numeric rows
+    17-21 (no header). See ``FIXTURES`` for the band/boundary expectations.
+    """
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    _write_rows(
+        ws,
+        1,
+        [
+            ["분기", "매출", "비고"],  # row 1 header (table 1)
+            ["1분기", 100, "a"],  # rows 2-5 data
+            ["2분기", 200, "b"],
+            ["3분기", 300, "c"],
+            ["4분기", 400, "d"],
+            # rows 6-7 left fully empty -> BLANK_RUN band separator
+        ],
+    )
+    _write_rows(
+        ws,
+        8,
+        [
+            ["부서", "인원", "예산"],  # row 8 header (table 2)
+            ["영업", 10, 1000],  # rows 9-14 data
+            ["개발", 20, 2000],
+            ["기획", 5, 500],
+            ["재무", 3, 300],
+            ["인사", 4, 400],
+            ["총무", 2, 200],
+            # rows 15-16 left fully empty -> BLANK_RUN band separator
+        ],
+    )
+    _write_rows(
+        ws,
+        17,
+        [
+            [1, 11, 111],  # rows 17-21: pure-numeric headerless band
+            [2, 22, 222],
+            [3, 33, 333],
+            [4, 44, 444],
+            [5, 55, 555],
+        ],
+    )
+    return _save_bytes(wb)
+
+
 def build_stacked_uneven_width() -> bytes:
     """Stacked tables of uneven width: 3 columns over 8 columns (guard #1).
 
@@ -1517,6 +1585,7 @@ BUILDERS: dict[str, Callable[[], bytes]] = {
     "no_header": build_no_header,
     "large_table": build_large_table,
     "multi_table_stacked": build_multi_table_stacked,
+    "stacked_headerless_band": build_stacked_headerless_band,
     "stacked_uneven_width": build_stacked_uneven_width,
     "title_between_tables": build_title_between_tables,
     "formulas": build_formulas,
