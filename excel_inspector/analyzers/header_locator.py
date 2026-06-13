@@ -9,11 +9,15 @@ formula::
     score(r) = 0.5 * non_empty_string_ratio(r)
              + 0.3 * type_consistency(rows r+1 .. r+5) * (n_below / 5)
              + 0.2 * distinctness(r vs rows r+1 .. r+5)
+             + time_series_code_header_bonus(r)
 
 where ``n_below`` is the number of rows actually observed in the lookahead
 window. The evidence factor (issue #8) keeps a bottom-of-sample candidate —
 whose 1-row window is trivially self-consistent — from outscoring the true
-header in small mixed-type tables.
+header in small mixed-type tables. The additive bonus (issue #23) is capped
+and only applies to a generic structural pattern: a time-axis label followed by
+compact series/code labels, with date-like axis values and numeric/null
+observations below.
 
 The highest-scoring row becomes ``header_row`` (1-based) with
 ``header_confidence = score`` and ``header_provenance = "heuristic"``. When the
@@ -42,13 +46,21 @@ analyze`) means the whole sheet and reproduces the v1 behavior exactly.
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from typing import TYPE_CHECKING
 
 from ..context import InspectionContext
 from .._time_axis import is_time_axis_label, is_time_axis_value
 from ..heuristics import (
+    HEADER_CODE_TOKEN_MAX_LENGTH,
+    HEADER_CODE_TOKEN_RATIO_THRESHOLD,
     HEADER_LOOKAHEAD_ROWS,
     HEADER_SCAN_ROWS,
+    HEADER_TIMESERIES_CODE_BONUS,
+    HEADER_TIMESERIES_DATE_AXIS_RATIO_THRESHOLD,
+    HEADER_TIMESERIES_MIN_CODE_LABELS,
+    HEADER_TIMESERIES_MIN_DATE_AXIS_VALUES,
+    HEADER_TIMESERIES_VALUE_RATIO_THRESHOLD,
     HEADER_WEIGHT_DISTINCTNESS,
     HEADER_WEIGHT_NON_EMPTY_STRING,
     HEADER_WEIGHT_TYPE_CONSISTENCY,
@@ -74,6 +86,18 @@ _CAT_STRING = "string"
 _CAT_NUMBER = "number"
 _CAT_DATE = "date"
 _CAT_OTHER = "other"
+
+_TIME_AXIS_LABELS = frozenset(
+    {"period", "date", "time", "year", "quarter", "month"}
+)
+_CODE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_./-]*$")
+_DATE_AXIS_TEXT_RE = re.compile(
+    r"^(?:"
+    r"\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?"
+    r"|\d{4}\s*[Qq][1-4]"
+    r"|[Qq][1-4]\s*\d{4}"
+    r")$"
+)
 
 
 def _categorize(value: object) -> str:
@@ -226,6 +250,147 @@ def _distinctness(
     return total / col_count
 
 
+def _first_non_empty(
+    row: list[object], col_count: int
+) -> tuple[int, object] | None:
+    """Return the first populated cell in ``row`` within ``col_count``."""
+
+    for index in range(col_count):
+        value = row[index] if index < len(row) else None
+        if _categorize(value) != _CAT_EMPTY:
+            return index, value
+    return None
+
+
+def _is_time_axis_label(value: object) -> bool:
+    """Whether ``value`` names a time axis such as Period/Date/Time."""
+
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() in _TIME_AXIS_LABELS
+
+
+def _is_code_like_label(value: object) -> bool:
+    """Whether ``value`` looks like a compact series/code header token.
+
+    The rule intentionally avoids natural-language labels: tokens must be
+    short, whitespace-free, and use repeated code separators. This catches
+    shapes like ``Q:4T:C:A:M:770:A`` and ``Q:AR:C:A:M:USD:A`` without
+    hardcoding a workbook or vendor name (issue #23).
+    """
+
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or len(text) > HEADER_CODE_TOKEN_MAX_LENGTH:
+        return False
+    if any(ch.isspace() for ch in text):
+        return False
+    if _CODE_TOKEN_RE.fullmatch(text) is None:
+        return False
+    separator_count = sum(1 for ch in text if ch in ":_./-")
+    has_letter = any(ch.isalpha() for ch in text)
+    return separator_count >= 2 and has_letter
+
+
+def _is_date_like_axis_value(value: object) -> bool:
+    """Whether a below-row value looks like a time-axis observation."""
+
+    if isinstance(value, (_dt.datetime, _dt.date)) and not isinstance(
+        value, _dt.time
+    ):
+        return True
+    if isinstance(value, str):
+        return _DATE_AXIS_TEXT_RE.fullmatch(value.strip()) is not None
+    return False
+
+
+def _is_numeric_like_measure(value: object) -> bool:
+    """Whether a non-axis data value is numeric-like for a time-series body."""
+
+    category = _categorize(value)
+    if category in {_CAT_EMPTY, _CAT_NUMBER}:
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return True
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _time_series_code_header_bonus(
+    candidate: list[object], below: list[list[object]], col_count: int
+) -> float:
+    """Score boost for wide time-series code headers (issue #23).
+
+    Some public statistical workbooks carry natural-language metadata in rows
+    above the actual pandas header. The leaf header is a single row whose first
+    cell names the time axis and whose remaining labels are compact series
+    codes, followed by date-axis rows and numeric/null observations. This
+    structural signal is deliberately generic and does not depend on the sheet
+    name, file name, or a vendor-specific code prefix.
+    """
+
+    first = _first_non_empty(candidate, col_count)
+    if first is None:
+        return 0.0
+    axis_index, axis_value = first
+    if not _is_time_axis_label(axis_value):
+        return 0.0
+
+    labels = [
+        candidate[index] if index < len(candidate) else None
+        for index in range(axis_index + 1, col_count)
+        if _categorize(candidate[index] if index < len(candidate) else None)
+        != _CAT_EMPTY
+    ]
+    if len(labels) < HEADER_TIMESERIES_MIN_CODE_LABELS:
+        return 0.0
+    code_hits = sum(1 for value in labels if _is_code_like_label(value))
+    code_ratio = code_hits / len(labels)
+    if code_ratio < HEADER_CODE_TOKEN_RATIO_THRESHOLD:
+        return 0.0
+
+    sampled_below = [
+        row
+        for row in below
+        if any(_categorize(value) != _CAT_EMPTY for value in row)
+    ]
+    axis_values = [
+        row[axis_index]
+        for row in sampled_below
+        if axis_index < len(row) and _categorize(row[axis_index]) != _CAT_EMPTY
+    ]
+    if len(axis_values) < HEADER_TIMESERIES_MIN_DATE_AXIS_VALUES:
+        return 0.0
+    date_ratio = sum(
+        1 for value in axis_values if _is_date_like_axis_value(value)
+    ) / len(axis_values)
+    if date_ratio < HEADER_TIMESERIES_DATE_AXIS_RATIO_THRESHOLD:
+        return 0.0
+
+    measure_values: list[object] = []
+    for row in sampled_below:
+        for index in range(axis_index + 1, col_count):
+            value = row[index] if index < len(row) else None
+            if _categorize(value) == _CAT_EMPTY:
+                continue
+            measure_values.append(value)
+    if measure_values:
+        measure_ratio = sum(
+            1 for value in measure_values if _is_numeric_like_measure(value)
+        ) / len(measure_values)
+        if measure_ratio < HEADER_TIMESERIES_VALUE_RATIO_THRESHOLD:
+            return 0.0
+
+    return HEADER_TIMESERIES_CODE_BONUS
+
+
 def _score_row(
     index: int, rows: list[list[object]], col_count: int
 ) -> float:
@@ -253,7 +418,7 @@ def _score_row(
     # below comparison from a single row, so it keeps its full weight as-is.
     evidence = len(below) / HEADER_LOOKAHEAD_ROWS
 
-    return (
+    base_score = (
         HEADER_WEIGHT_NON_EMPTY_STRING
         * _non_empty_string_ratio(candidate, col_count)
         + HEADER_WEIGHT_TYPE_CONSISTENCY
@@ -262,6 +427,8 @@ def _score_row(
         + HEADER_WEIGHT_DISTINCTNESS
         * _distinctness(candidate, below, col_count)
     )
+    bonus = _time_series_code_header_bonus(candidate, below, col_count)
+    return min(1.0, base_score + bonus)
 
 
 def _row_filled(row: list[object], col_count: int) -> int:

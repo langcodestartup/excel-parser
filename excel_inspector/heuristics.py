@@ -26,6 +26,32 @@ HEADER_WEIGHT_DISTINCTNESS: float = 0.2
 #: Number of rows below a header candidate examined for consistency/distinctness.
 HEADER_LOOKAHEAD_ROWS: int = 5
 
+#: Additive score cap for a wide time-series code header signal (issue #23).
+#: This rescues leaf-code rows such as ``Period, Q:...`` that sit under several
+#: all-string metadata rows. The final header score remains clamped to 1.0.
+HEADER_TIMESERIES_CODE_BONUS: float = 0.25
+
+#: Minimum share of non-axis labels in a candidate row that must look like
+#: compact series/code tokens before the time-series bonus can apply.
+HEADER_CODE_TOKEN_RATIO_THRESHOLD: float = 0.6
+
+#: Minimum number of code-like labels required for the time-series bonus.
+HEADER_TIMESERIES_MIN_CODE_LABELS: int = 3
+
+#: Minimum observed date-like values in the candidate's axis column below it.
+HEADER_TIMESERIES_MIN_DATE_AXIS_VALUES: int = 2
+
+#: Minimum share of observed axis values below the candidate that must be
+#: date-like for the time-series bonus.
+HEADER_TIMESERIES_DATE_AXIS_RATIO_THRESHOLD: float = 0.8
+
+#: Minimum share of populated non-axis cells below the candidate that must be
+#: numeric-like for the time-series bonus. Empty cells are neutral.
+HEADER_TIMESERIES_VALUE_RATIO_THRESHOLD: float = 0.8
+
+#: Maximum length of a compact series/code token.
+HEADER_CODE_TOKEN_MAX_LENGTH: int = 40
+
 #: Default header confidence threshold; below this -> ``needs_manual_header``.
 #: Overridable via ``InspectionOptions.header_confidence_threshold`` (spec §7.1).
 HEADER_CONFIDENCE_THRESHOLD: float = 0.5
