@@ -282,6 +282,40 @@ def test_extract_wide_sparse_timeseries(fixture_path) -> None:
     assert table.dataframe.iloc[0, 0] == pd.Timestamp("2020-03-28")
 
 
+def test_extract_bis_sparse_time_series_preserves_date_only_rows() -> None:
+    """Issue #24: early date-only wide time-series rows must not shrink nrows."""
+
+    from excel_inspector import InspectionOptions, SheetOverride
+
+    opts = InspectionOptions(
+        sheet_overrides={
+            "Quarterly Series": SheetOverride(header_row=4, is_tabular=True)
+        }
+    )
+    cases = [
+        (
+            "bis_pp_selected.xlsx",
+            387,
+            pd.Timestamp("1927-03-31"),
+            pd.Timestamp("2023-09-30"),
+        ),
+        (
+            "bis_totcredit.xlsx",
+            333,
+            pd.Timestamp("1940-06-30"),
+            pd.Timestamp("2023-06-30"),
+        ),
+    ]
+    for filename, expected_rows, first_period, last_period in cases:
+        wr = extract(Path(__file__).parent / "real_xlsx" / filename, options=opts)
+        table = next(t for t in wr.tables if t.sheet_name == "Quarterly Series")
+
+        assert len(table.dataframe) == expected_rows
+        assert table.dataframe.iloc[0]["Period"] == first_period
+        assert table.dataframe.iloc[-1]["Period"] == last_period
+        assert not any("ignoring skip_row" in warning for warning in wr.warnings)
+
+
 def test_extract_headerless_override_notes_dtype_skip(fixture_path) -> None:
     """L6 (plan v2 Phase 13 Step 2): the headerless note reaches the JSON.
 
