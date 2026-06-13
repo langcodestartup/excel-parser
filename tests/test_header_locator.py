@@ -20,6 +20,8 @@ from excel_inspector import (
     InspectionOptions,
     Loader,
     SheetOverride,
+    extract,
+    inspect,
 )
 from excel_inspector.analyzers.header_locator import (
     HeaderLocator,
@@ -48,6 +50,12 @@ def _run_on(
         context.loader = loader
         SheetEnumerator().analyze(context)
         return HeaderLocator().analyze(context)
+
+
+def _real_xlsx(name: str) -> Path:
+    """Return a checked-in real-world workbook path."""
+
+    return Path(__file__).parent / "real_xlsx" / name
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +125,48 @@ def test_types_mixed_row_one(fixture_path) -> None:
     assert sheet.header_row == 1
     assert sheet.needs_manual_header is False
     assert sheet.header_confidence >= 0.5
+
+
+def test_bis_quarterly_series_code_header_detected() -> None:
+    """Issue #23: BIS wide time-series sheets use row 4 code headers.
+
+    The tabular override isolates the header locator regression from the
+    still-separate non-tabular gate issue: once the sheet is allowed into the
+    pipeline, the automatic header must be the ``Period, Q:...`` leaf row, not
+    the natural-language metadata rows above it.
+    """
+
+    options = InspectionOptions(
+        sheet_overrides={"Quarterly Series": SheetOverride(is_tabular=True)}
+    )
+    for workbook in ("bis_pp_selected.xlsx", "bis_totcredit.xlsx"):
+        profile = inspect(_real_xlsx(workbook), options)
+        sheet = next(s for s in profile.sheets if s.name == "Quarterly Series")
+
+        assert sheet.header_row == 4
+        assert sheet.header_provenance == "heuristic"
+        assert sheet.needs_manual_header is False
+        assert sheet.read_plan is not None
+        assert sheet.read_plan.header == 0
+        assert sheet.read_plan.skiprows[:3] == [0, 1, 2]
+        assert sheet.read_plan.dtype_map["0"] == "datetime64[ns]"
+
+
+def test_bis_quarterly_series_extract_uses_period_column() -> None:
+    """Issue #23: extraction must not expose metadata as column names."""
+
+    options = InspectionOptions(
+        sheet_overrides={"Quarterly Series": SheetOverride(is_tabular=True)}
+    )
+    for workbook in ("bis_pp_selected.xlsx", "bis_totcredit.xlsx"):
+        result = extract(_real_xlsx(workbook), options)
+        table = next(t for t in result.tables if t.sheet_name == "Quarterly Series")
+        columns = list(table.dataframe.columns)
+
+        assert table.header_row == 4
+        assert columns[0] == "Period"
+        assert "Back to menu" not in columns
+        assert str(table.dataframe["Period"].dtype).startswith("datetime64")
 
 
 def test_offset_outscores_simple_confidence(fixture_path) -> None:
@@ -391,6 +441,31 @@ def test_score_row_combines_components() -> None:
         + 0.2 * _distinctness(rows[0], rows[1:3], 3)
     )
     assert abs(s - expected) < 1e-12
+
+
+def test_wide_time_series_code_header_bonus_prefers_leaf_row() -> None:
+    """Issue #23: code-like leaf headers can beat metadata rows above them."""
+
+    rows = [
+        [
+            "Back to menu",
+            "Long statistical series description",
+            "Long statistical series description",
+            "Long statistical series description",
+        ],
+        [None, "Index, 2010 = 100 (-)", "US dollar (Billions)", "Per cent"],
+        [None, "Emerging market economies", "Advanced economies", "World"],
+        ["Period", "Q:AA:C:A", "Q:AR:C:A", "Q:US:C:A"],
+        [_dt.datetime(2020, 3, 31), None, 1.5, 2.5],
+        [_dt.datetime(2020, 6, 30), None, 1.7, 2.6],
+        [_dt.datetime(2020, 9, 30), 1.0, 1.8, 2.7],
+        [_dt.datetime(2020, 12, 31), 1.1, 1.9, 2.8],
+    ]
+    scores = [_score_row(i, rows, 4) for i in range(len(rows))]
+
+    assert max(range(len(scores)), key=scores.__getitem__) == 3
+    assert scores[3] > scores[0]
+    assert scores[3] >= 0.5
 
 
 def test_date_cells_categorized_as_date() -> None:
