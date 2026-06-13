@@ -8,6 +8,8 @@ the corrupt/encrypted domain-exception paths.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from excel_inspector import (
@@ -15,8 +17,11 @@ from excel_inspector import (
     EncryptedWorkbookError,
     InspectionOptions,
     SheetOverride,
+    extract,
     inspect,
 )
+
+_REAL_XLSX_DIR = Path(__file__).resolve().parent / "real_xlsx"
 
 
 def test_inspect_header_simple(fixture_path) -> None:
@@ -192,3 +197,26 @@ def test_inspect_every_openable_fixture(openable_fixture) -> None:
     assert profile.file_path == str(openable_fixture)
     assert isinstance(profile.sheets, list)
     assert len(profile.sheets) >= 1
+
+
+@pytest.mark.parametrize(
+    "filename,expected_rows,expected_cols",
+    [
+        ("bis_pp_selected.xlsx", 387, 249),
+        ("bis_totcredit.xlsx", 333, 1134),
+    ],
+)
+def test_bis_quarterly_series_wide_sparse_extracted(
+    filename: str, expected_rows: int, expected_cols: int
+) -> None:
+    """issue #22: 실전 BIS Quarterly Series는 non-tabular로 누락되지 않는다."""
+
+    wr = extract(_REAL_XLSX_DIR / filename)
+    entry = {sheet.name: sheet for sheet in wr.sheets}["Quarterly Series"]
+
+    assert entry.skipped is False
+    assert entry.skip_reason is None
+    (table,) = entry.tables
+    assert table.header_row == 4
+    assert table.dataframe.shape == (expected_rows, expected_cols)
+    assert table.dataframe.columns[0] == "Period"

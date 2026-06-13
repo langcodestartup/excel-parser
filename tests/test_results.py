@@ -264,6 +264,24 @@ def test_extract_blank_leading_header_preserves_key_column(tmp_path) -> None:
     ]
 
 
+def test_extract_wide_sparse_timeseries(fixture_path) -> None:
+    """issue #22: a wide sparse Period/date-axis table is extracted."""
+
+    wr = extract(fixture_path("wide_sparse_timeseries"))
+    (entry,) = wr.sheets
+    assert entry.skipped is False
+    assert entry.skip_reason is None
+    (table,) = entry.tables
+    assert table.header_row == 4
+    assert table.dataframe.shape == (12, 12)
+    assert list(table.dataframe.columns[:3]) == [
+        "Period",
+        "Q:TS:001",
+        "Q:TS:002",
+    ]
+    assert table.dataframe.iloc[0, 0] == pd.Timestamp("2020-03-28")
+
+
 def test_extract_headerless_override_notes_dtype_skip(fixture_path) -> None:
     """L6 (plan v2 Phase 13 Step 2): the headerless note reaches the JSON.
 

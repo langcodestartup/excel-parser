@@ -148,6 +148,17 @@ def test_non_tabular_sheet_is_skipped(fixture_path) -> None:
     assert sheets["Data"].header_provenance == "heuristic"
 
 
+def test_wide_sparse_timeseries_period_header_row(fixture_path) -> None:
+    """issue #22: Period row beats dense metadata rows above it."""
+
+    sheet = _run_on(
+        fixture_path("wide_sparse_timeseries")
+    ).workbook_profile.sheets[0]
+    assert sheet.header_row == 4
+    assert sheet.needs_manual_header is False
+    assert sheet.header_confidence >= 0.5
+
+
 # ---------------------------------------------------------------------------
 # Override path [D2]
 # ---------------------------------------------------------------------------
@@ -402,6 +413,27 @@ def test_date_cells_categorized_as_date() -> None:
     ]
     # Column 0 is all dates -> fully consistent.
     assert _type_consistency(below, 2) == 1.0
+
+
+def test_wide_time_series_header_priority() -> None:
+    """A dense Period row above immediate date-axis rows wins over metadata."""
+
+    rows = [
+        ["Back"] + [f"title {i}" for i in range(1, 12)],
+        [None] + ["unit" for _ in range(11)],
+        [None] + ["area" for _ in range(11)],
+        ["Period"] + [f"Q:TS:{i:03d}" for i in range(1, 12)],
+        [_dt.datetime(2020, 3, 31), 1] + [None] * 10,
+        [_dt.datetime(2020, 6, 30), None, 2] + [None] * 9,
+        [_dt.datetime(2020, 9, 30), None, None, 3] + [None] * 8,
+    ]
+    profile = make_sheet_profile(name="S", max_row=len(rows), max_col=12)
+    ctx = make_context(sheets=[profile], loader=_FakeLoader({"S": rows}))
+
+    header_row, score = HeaderLocator()._locate(ctx, profile)
+
+    assert header_row == 4
+    assert score >= 0.5
 
 
 # ---------------------------------------------------------------------------

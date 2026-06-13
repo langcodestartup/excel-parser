@@ -92,11 +92,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..context import InspectionContext
+from .._time_axis import is_time_axis_value
 from ..heuristics import (
     BLANK_RUN,
     LOW_DENSITY_THRESHOLD,
     TYPE_SAMPLE_ROWS,
     TYPE_SUCCESS_THRESHOLD,
+    WIDE_SPARSE_MIN_POPULATED_COLS,
 )
 from ..models import SheetProfile
 from ..options import get_sheet_override, get_skip_keywords
@@ -432,6 +434,29 @@ def _span_density(
         if not _is_empty(value):
             non_empty += 1
     return non_empty / span, non_empty
+
+
+def _cell_at(row: list[object], one_based_col: int) -> object | None:
+    """Return a 1-based cell from a sampled row, or ``None`` if absent."""
+
+    index = one_based_col - 1
+    return row[index] if 0 <= index < len(row) else None
+
+
+def _is_wide_sparse_axis_data_row(
+    row: list[object], left_col: int, table_width: int, non_empty: int
+) -> bool:
+    """Whether a low-density row is still a wide time-series data row.
+
+    In issue #22, the row's first table column is the date/period axis and the
+    many right-hand series columns are sparsely populated. Such rows are real
+    observations, not subtotal/separator rows, even when their density is below
+    the generic threshold.
+    """
+
+    if table_width < WIDE_SPARSE_MIN_POPULATED_COLS or non_empty == 0:
+        return False
+    return is_time_axis_value(_cell_at(row, left_col))
 
 
 def _value_kind(value: object) -> str | None:
@@ -778,8 +803,12 @@ class BoundaryDetector(Analyzer):
             # only when the table is at least 3 columns wide; a 1- or 2-column
             # (key-value / narrow) table's normal rows would otherwise be
             # misclassified as subtotals (spec §7.2, MEDIUM #5).
-            is_low_density = density < LOW_DENSITY_THRESHOLD or (
-                non_empty == 1 and table_width >= 3
+            is_axis_data_row = _is_wide_sparse_axis_data_row(
+                row, left_col, table_width, non_empty
+            )
+            is_low_density = False if is_axis_data_row else (
+                density < LOW_DENSITY_THRESHOLD
+                or (non_empty == 1 and table_width >= 3)
             )
 
             if is_keyword or is_low_density:

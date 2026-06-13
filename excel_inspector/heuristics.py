@@ -55,6 +55,25 @@ MIN_TABULAR_POPULATED_COLS: int = 1
 #: 0.583) pins that margin in the test suite so the threshold cannot creep up.
 NON_TABULAR_DENSITY_THRESHOLD: float = 0.5
 
+#: Minimum sampled populated columns for the wide-sparse matrix escape hatch
+#: (issue #22). Below this, the existing density rule remains authoritative so
+#: scattered cover sheets like ``cover_sparse`` stay non-tabular.
+WIDE_SPARSE_MIN_POPULATED_COLS: int = 8
+
+#: A candidate header row in a wide sparse sheet must populate most sampled
+#: columns. BIS ``Quarterly Series`` has dense metadata/header rows over
+#: hundreds of columns, while the data rows are intentionally sparse.
+WIDE_SPARSE_DENSE_ROW_RATIO: float = 0.8
+
+#: Number of rows immediately below a dense candidate row examined for a time
+#: axis. Kept small so title/metadata rows above the real header do not borrow
+#: date evidence from far below.
+WIDE_SPARSE_AXIS_LOOKAHEAD_ROWS: int = 3
+
+#: Minimum immediate below rows whose first column looks like a date/period
+#: value before a low-density wide sheet is preserved as tabular.
+WIDE_SPARSE_MIN_AXIS_ROWS: int = 2
+
 # ---------------------------------------------------------------------------
 # §7.2 Boundary detection rules
 # ---------------------------------------------------------------------------

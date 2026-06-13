@@ -45,12 +45,17 @@ import datetime as _dt
 from typing import TYPE_CHECKING
 
 from ..context import InspectionContext
+from .._time_axis import is_time_axis_label, is_time_axis_value
 from ..heuristics import (
     HEADER_LOOKAHEAD_ROWS,
     HEADER_SCAN_ROWS,
     HEADER_WEIGHT_DISTINCTNESS,
     HEADER_WEIGHT_NON_EMPTY_STRING,
     HEADER_WEIGHT_TYPE_CONSISTENCY,
+    WIDE_SPARSE_AXIS_LOOKAHEAD_ROWS,
+    WIDE_SPARSE_DENSE_ROW_RATIO,
+    WIDE_SPARSE_MIN_AXIS_ROWS,
+    WIDE_SPARSE_MIN_POPULATED_COLS,
 )
 from ..models import SheetProfile
 from ..options import (
@@ -259,6 +264,58 @@ def _score_row(
     )
 
 
+def _row_filled(row: list[object], col_count: int) -> int:
+    """Count non-empty cells in ``row`` within ``col_count`` columns."""
+
+    return sum(
+        1 for value in row[:col_count] if _categorize(value) != _CAT_EMPTY
+    )
+
+
+def _first_cell(row: list[object]) -> object | None:
+    """Return column A's value from a sampled row."""
+
+    return row[0] if row else None
+
+
+def _wide_time_series_header_index(
+    rows: list[list[object]], col_count: int
+) -> int | None:
+    """Find a dense wide header row immediately above a time axis.
+
+    This is a conservative issue #22 tie-breaker layered above the generic
+    score: it only fires on wide sheets, on rows that populate most columns,
+    and only when the first column of the immediately following rows carries
+    date/period values. That lets ``Period`` code rows beat title/metadata
+    rows such as BIS' ``Back to menu`` line without changing the public scoring
+    helper contract.
+    """
+
+    if col_count < WIDE_SPARSE_MIN_POPULATED_COLS:
+        return None
+
+    for index, row in enumerate(rows):
+        dense_ratio = _row_filled(row, col_count) / col_count
+        if dense_ratio < WIDE_SPARSE_DENSE_ROW_RATIO:
+            continue
+
+        below = rows[index + 1 : index + 1 + WIDE_SPARSE_AXIS_LOOKAHEAD_ROWS]
+        axis_rows = sum(
+            1 for below_row in below if is_time_axis_value(_first_cell(below_row))
+        )
+        if axis_rows < WIDE_SPARSE_MIN_AXIS_ROWS:
+            continue
+
+        first = _first_cell(row)
+        if is_time_axis_label(first):
+            return index
+        if _categorize(first) == _CAT_EMPTY and is_time_axis_value(
+            _first_cell(below[0]) if below else None
+        ):
+            return index
+    return None
+
+
 class HeaderLocator(Analyzer):
     """Estimate each tabular sheet's header row (spec §4.3, §7.1) [D4]."""
 
@@ -400,6 +457,12 @@ class HeaderLocator(Analyzer):
         )
         if not rows or col_count <= 0:
             return None, 0.0
+
+        wide_axis_index = _wide_time_series_header_index(rows, col_count)
+        if wide_axis_index is not None:
+            return window_start + wide_axis_index, _score_row(
+                wide_axis_index, rows, col_count
+            )
 
         best_index = -1
         best_score = -1.0

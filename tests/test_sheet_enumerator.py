@@ -8,6 +8,7 @@ no-loader degradation path.
 
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 
 import pytest
@@ -209,6 +210,17 @@ def test_sparse_cover_is_non_tabular(fixture_path) -> None:
     assert s.is_tabular_candidate is False
 
 
+def test_wide_sparse_timeseries_is_tabular(fixture_path) -> None:
+    """issue #22: low-density wide Period/date-axis sheets are tabular."""
+
+    ctx = _run_on(fixture_path("wide_sparse_timeseries"))
+    s = ctx.workbook_profile.sheets[0]
+    assert s.name == "Quarterly Series"
+    assert s.max_col == 12
+    assert s.is_tabular_candidate is True
+    assert s.is_tabular_provenance == "heuristic"
+
+
 @pytest.mark.parametrize(
     "fixture_id,sheet,expected",
     [
@@ -221,6 +233,7 @@ def test_sparse_cover_is_non_tabular(fixture_path) -> None:
         ("empty_sheet", "Sheet1", False),  # empty sheet
         ("cover_offset", "표지", False),  # issue #3: B-offset single column
         ("cover_sparse", "표지", False),  # multi-column but sparse (density 0.333)
+        ("wide_sparse_timeseries", "Quarterly Series", True),  # issue #22
     ],
 )
 def test_tabular_classification(fixture_path, fixture_id, sheet, expected) -> None:
@@ -288,3 +301,23 @@ def test_density_rule_low_density_is_non_tabular() -> None:
         ctx, "S", max_row=3, max_col=3
     )
     assert result is False
+
+
+def test_density_rule_wide_sparse_axis_escape_hatch() -> None:
+    """A dense wide header followed by date-axis sparse rows stays tabular."""
+
+    rows = [
+        ["Back"] + [f"title {i}" for i in range(1, 12)],
+        [None] + ["unit" for _ in range(11)],
+        [None] + ["area" for _ in range(11)],
+        ["Period"] + [f"Q:TS:{i:03d}" for i in range(1, 12)],
+        [_dt.datetime(2020, 3, 31), 1] + [None] * 10,
+        [_dt.datetime(2020, 6, 30), None, 2] + [None] * 9,
+        [_dt.datetime(2020, 9, 30), None, None, 3] + [None] * 8,
+    ]
+    loader = _FakeLoader({"S": _FakeWorksheet(rows)})
+    ctx = make_context(loader=loader)
+    result, _ = SheetEnumerator()._is_tabular_candidate(
+        ctx, "S", max_row=len(rows), max_col=12
+    )
+    assert result is True

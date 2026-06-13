@@ -279,6 +279,18 @@ FIXTURES: dict[str, FixtureSpec] = {
         "expected True. Pins the density-rule margin so the threshold cannot "
         "be raised past 0.583 without a red test (issue #3).",
     ),
+    "wide_sparse_timeseries": FixtureSpec(
+        "wide_sparse_timeseries.xlsx",
+        True,
+        "BIS-like wide sparse time-series table (issue #22). Sheet "
+        "'Quarterly Series'. Rows 1-3 are dense metadata/title rows over "
+        "A:L. Row 4 is the real header: A4='Period', B4:L4 are series codes. "
+        "Rows 5-16 are sparse observations: column A holds quarterly dates "
+        "and only a few series cells are populated. Top-sample density is "
+        "below NON_TABULAR_DENSITY_THRESHOLD, but the dense header plus "
+        "date-axis body means is_tabular_candidate=True, header_row=4, "
+        "data_start_row=5, data_end_row=16, skip_rows=[].",
+    ),
     "memo_scattered": FixtureSpec(
         "memo_scattered.xlsx",
         True,
@@ -1018,6 +1030,39 @@ def build_sparse_real_table() -> bytes:
     return _save_bytes(wb)
 
 
+def build_wide_sparse_timeseries() -> bytes:
+    """BIS-like wide sparse time-series table (issue #22).
+
+    The top 16-row sample has 12 populated columns and density below 0.5, but
+    row 4 is a dense ``Period`` header and rows 5-16 carry a date axis with
+    sparse observations. This distinguishes a real wide matrix from scattered
+    cover sheets.
+    """
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Quarterly Series"
+
+    series_codes = [f"Q:TS:{i:03d}" for i in range(1, 12)]
+    rows: list[list[object]] = [
+        ["Back to menu"] + [f"Series title {i}" for i in range(1, 12)],
+        [None] + ["Index, 2020 = 100" for _ in range(11)],
+        [None] + [f"Reference area {i}" for i in range(1, 12)],
+        ["Period"] + series_codes,
+    ]
+    for offset in range(12):
+        row: list[object] = [
+            _dt.datetime(2020 + offset // 4, 3 * (offset % 4 + 1), 28)
+        ] + [None] * 11
+        row[1 + (offset % 11)] = 100.0 + offset
+        if offset % 4 == 0:
+            row[11] = 200.0 + offset
+        rows.append(row)
+
+    _write_rows(ws, 1, rows)
+    return _save_bytes(wb)
+
+
 def build_memo_scattered() -> bytes:
     """Multi-band memo sheet where every band is judged non-table (issue #10).
 
@@ -1576,6 +1621,7 @@ BUILDERS: dict[str, Callable[[], bytes]] = {
     "cover_offset": build_cover_offset,
     "cover_sparse": build_cover_sparse,
     "sparse_real_table": build_sparse_real_table,
+    "wide_sparse_timeseries": build_wide_sparse_timeseries,
     "memo_scattered": build_memo_scattered,
     "hidden_sheet": build_hidden_sheet,
     "blank_run_terminates": build_blank_run_terminates,

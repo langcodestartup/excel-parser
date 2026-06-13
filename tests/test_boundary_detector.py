@@ -208,6 +208,18 @@ def test_header_simple_full_width_no_usecols(fixture_path) -> None:
     assert sheet.data_right_col is None
 
 
+def test_wide_sparse_timeseries_sparse_date_rows_preserved(fixture_path) -> None:
+    """issue #22: sparse date-axis observations are data, not skip rows."""
+
+    sheet = _run_on(
+        fixture_path("wide_sparse_timeseries")
+    ).workbook_profile.sheets[0]
+    assert sheet.header_row == 4
+    assert sheet.data_start_row == 5
+    assert sheet.data_end_row == 16
+    assert sheet.skip_rows == []
+
+
 def test_no_header_sheet_left_untouched(fixture_path) -> None:
     """no_header: header estimation failed -> no anchor, boundaries stay None."""
 
@@ -491,6 +503,26 @@ def test_isolated_three_column_single_filled_is_subtotal() -> None:
     assert profile.data_start_row == 2
     assert profile.data_end_row == 4
     assert profile.skip_rows == [3]
+
+
+def test_isolated_wide_sparse_date_axis_rows_preserved() -> None:
+    """Wide date-axis rows with few values are not low-density skips."""
+
+    rows = [
+        ["Period"] + [f"Q:TS:{i:03d}" for i in range(1, 12)],
+        [_dt.datetime(2020, 3, 31), 1] + [None] * 10,
+        [_dt.datetime(2020, 6, 30), None, 2] + [None] * 9,
+        [_dt.datetime(2020, 9, 30), None, None, 3] + [None] * 8,
+    ]
+    profile = make_sheet_profile(
+        name="S", header_row=1, max_row=len(rows), max_col=12
+    )
+    ctx = make_context(sheets=[profile], loader=_FakeLoader({"S": rows}))
+
+    BoundaryDetector().analyze(ctx)
+    assert profile.data_start_row == 2
+    assert profile.data_end_row == 4
+    assert profile.skip_rows == []
 
 
 def test_isolated_single_interior_blank_recorded() -> None:

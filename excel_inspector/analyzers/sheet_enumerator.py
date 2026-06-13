@@ -11,16 +11,22 @@ dimensions look untrustworthy this analyzer marks
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from openpyxl.utils import get_column_letter
 
 from ..context import InspectionContext
 from ..exceptions import InspectorError
+from .._time_axis import is_time_axis_value
 from ..heuristics import (
     MIN_TABULAR_POPULATED_COLS,
     NON_TABULAR_DENSITY_THRESHOLD,
     NON_TABULAR_SAMPLE_ROWS,
+    WIDE_SPARSE_AXIS_LOOKAHEAD_ROWS,
+    WIDE_SPARSE_DENSE_ROW_RATIO,
+    WIDE_SPARSE_MIN_AXIS_ROWS,
+    WIDE_SPARSE_MIN_POPULATED_COLS,
 )
 from ..models import SheetProfile
 from ..options import get_is_tabular_override
@@ -33,6 +39,39 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: non-tabular by the legacy dimension-only fallback (empty sample / sampling
 #: error). The content-aware gate counts *populated* columns instead [issue #3].
 _MAX_NON_TABULAR_COLS = 1
+
+
+@dataclass(frozen=True)
+class _SampleRow:
+    """One row from the bounded non-tabular classification sample."""
+
+    row_number: int
+    values: tuple[object, ...]
+    filled: int
+
+    @property
+    def first_cell(self) -> object | None:
+        """Return column A's value from this sampled row."""
+
+        return self.values[0] if self.values else None
+
+
+@dataclass(frozen=True)
+class _DensitySample:
+    """Content summary for the top-of-sheet tabular gate sample."""
+
+    populated_cols: int
+    populated_rows: int
+    filled: int
+    rows: tuple[_SampleRow, ...]
+
+    @property
+    def density(self) -> float:
+        """Return ``filled / (populated_cols * populated_rows)`` safely."""
+
+        if self.populated_cols == 0 or self.populated_rows == 0:
+            return 0.0
+        return self.filled / (self.populated_cols * self.populated_rows)
 
 
 def _is_non_empty(value: object) -> bool:
@@ -178,9 +217,7 @@ class SheetEnumerator(Analyzer):
             return override, "manual"
 
         try:
-            populated_cols, populated_rows, filled = self._sample_density(
-                context, sheet_name
-            )
+            sample = self._sample_density(context, sheet_name)
         except InspectorError:
             # Loader domain errors (corrupt/encrypted) are NOT absorbed: they
             # must abort the pipeline (spec §6/§9, like pipeline.py).
@@ -192,12 +229,13 @@ class SheetEnumerator(Analyzer):
             )
             return self._dims_tabular(max_row, max_col), "heuristic"
 
-        if populated_cols == 0:
+        if sample.populated_cols == 0:
             return self._dims_tabular(max_row, max_col), "heuristic"
-        if populated_cols <= MIN_TABULAR_POPULATED_COLS:
+        if sample.populated_cols <= MIN_TABULAR_POPULATED_COLS:
             return False, "heuristic"
-        density = filled / (populated_cols * populated_rows)
-        if density < NON_TABULAR_DENSITY_THRESHOLD:
+        if sample.density < NON_TABULAR_DENSITY_THRESHOLD:
+            if _looks_like_wide_sparse_matrix(sample):
+                return True, "heuristic"
             return False, "heuristic"
         return True, "heuristic"
 
@@ -215,15 +253,17 @@ class SheetEnumerator(Analyzer):
 
     def _sample_density(
         self, context: InspectionContext, sheet_name: str
-    ) -> tuple[int, int, int]:
+    ) -> _DensitySample:
         """Sample the top rows in data mode and summarize populated content.
 
         Reads the top :data:`~excel_inspector.heuristics.NON_TABULAR_SAMPLE_ROWS`
-        rows of ``sheet_name`` in data mode [D3] and returns
-        ``(populated_cols, populated_rows, filled)`` where ``populated_cols`` is
-        the number of distinct columns holding any non-empty cell,
-        ``populated_rows`` the number of rows with any non-empty cell, and
-        ``filled`` the total non-empty cell count.
+        rows of ``sheet_name`` in data mode [D3] and returns a
+        :class:`_DensitySample`. ``populated_cols`` is the number of distinct
+        columns holding any non-empty cell, ``populated_rows`` the number of
+        rows with any non-empty cell, and ``filled`` the total non-empty cell
+        count. The bounded row summaries let issue #22's wide sparse matrix
+        gate recognize a dense header row plus a date/period axis without
+        materializing more than the same top sample window.
 
         Raises:
             InspectorError: A loader domain error; the caller re-raises it.
@@ -239,15 +279,54 @@ class SheetEnumerator(Analyzer):
         populated_cols: set[int] = set()
         populated_rows = 0
         filled = 0
-        for row in worksheet.iter_rows(
-            min_row=1, max_row=NON_TABULAR_SAMPLE_ROWS, values_only=True
+        sample_rows: list[_SampleRow] = []
+        for row_number, row in enumerate(
+            worksheet.iter_rows(
+                min_row=1, max_row=NON_TABULAR_SAMPLE_ROWS, values_only=True
+            ),
+            start=1,
         ):
             row_has_content = False
+            row_filled = 0
             for col_index, value in enumerate(row):
                 if _is_non_empty(value):
                     populated_cols.add(col_index)
                     filled += 1
+                    row_filled += 1
                     row_has_content = True
             if row_has_content:
                 populated_rows += 1
-        return len(populated_cols), populated_rows, filled
+            sample_rows.append(
+                _SampleRow(row_number, tuple(row), row_filled)
+            )
+        return _DensitySample(
+            len(populated_cols), populated_rows, filled, tuple(sample_rows)
+        )
+
+
+def _looks_like_wide_sparse_matrix(sample: _DensitySample) -> bool:
+    """Return True for wide time-series matrices whose body is sparse.
+
+    Issue #22: BIS ``Quarterly Series`` sheets have a dense header/metadata
+    band over hundreds of columns, followed immediately by rows whose first
+    column is a date axis while only a handful of series values are populated.
+    Whole-sample density is therefore low, but the sheet is clearly tabular.
+    """
+
+    if sample.populated_cols < WIDE_SPARSE_MIN_POPULATED_COLS:
+        return False
+
+    for index, row in enumerate(sample.rows):
+        dense_ratio = row.filled / sample.populated_cols
+        if dense_ratio < WIDE_SPARSE_DENSE_ROW_RATIO:
+            continue
+
+        below = sample.rows[
+            index + 1 : index + 1 + WIDE_SPARSE_AXIS_LOOKAHEAD_ROWS
+        ]
+        axis_rows = sum(
+            1 for below_row in below if is_time_axis_value(below_row.first_cell)
+        )
+        if axis_rows >= WIDE_SPARSE_MIN_AXIS_ROWS:
+            return True
+    return False

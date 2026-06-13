@@ -303,6 +303,25 @@ def test_mixed_sheets_has_readme_and_data(fixture_path) -> None:
         wb.close()
 
 
+def test_wide_sparse_timeseries_layout(fixture_path) -> None:
+    """wide_sparse_timeseries: dense Period header, sparse date-axis body."""
+
+    wb = openpyxl.load_workbook(
+        fixture_path("wide_sparse_timeseries"), data_only=True
+    )
+    try:
+        ws = wb["Quarterly Series"]
+        assert ws.max_column == 12
+        assert ws.max_row == 16
+        assert ws["A4"].value == "Period"
+        assert ws["B4"].value == "Q:TS:001"
+        assert hasattr(ws["A5"].value, "year")
+        assert ws["B5"].value == 100
+        assert ws["C5"].value is None
+    finally:
+        wb.close()
+
+
 def test_hidden_sheet_states(fixture_path) -> None:
     """hidden_sheet: visible/hidden/veryHidden sheet states (issue #6)."""
 
