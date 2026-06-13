@@ -20,7 +20,11 @@ and applies the §7.2 rules:
   a subtotal/separator candidate. The "only a single column filled"
   (``non_empty == 1``) rule applies **only when the table is >= 3 columns
   wide**, so a 1- or 2-column (key-value / narrow) table's normal rows are not
-  misclassified as subtotals (§7.2, MEDIUM #5).
+  misclassified as subtotals (§7.2, MEDIUM #5). Exception: in a time-axis table
+  (``Period``/``Date``/``Time``-style first header, or a blank first header with
+  real date/time keys), low-density rows whose first table cell is a time key
+  are preserved as sparse observations instead of being treated as separators
+  (issue #24).
 * **Skip keywords** — a row whose **leading (first non-empty) label cell**
   matches any :data:`~excel_inspector.heuristics.SKIP_KEYWORDS` term is a
   ``skip_rows`` candidate regardless of its density. The leading-label scan is
@@ -87,6 +91,7 @@ sheet-level applier copies the result onto the profile.
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -113,6 +118,45 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: derivation — it never reaches density or keyword matching.
 _MERGE_FILLED: object = object()
 
+_TIME_AXIS_HEADER_TOKENS: frozenset[str] = frozenset(
+    {"period", "date", "time", "year", "month", "quarter", "qtr"}
+)
+_TIME_AXIS_HEADER_SUBSTRINGS: tuple[str, ...] = (
+    "날짜",
+    "일자",
+    "기간",
+    "시점",
+    "연도",
+    "년도",
+    "분기",
+)
+_DATE_MONTH_RE = r"(?:0?[1-9]|1[0-2])"
+_DATE_DAY_RE = r"(?:0?[1-9]|[12]\d|3[01])"
+_TIME_AXIS_TEXT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Korean / ISO-style dates: 2020-03-31, 2020.3.31, 2020/03/31.
+    re.compile(
+        rf"^\d{{4}}\s*[-/.]\s*{_DATE_MONTH_RE}\s*"
+        rf"(?:[-/.]\s*{_DATE_DAY_RE}\.?)?$"
+    ),
+    # Korean text dates: 2020년 3월 31일, 2020년 3월.
+    re.compile(
+        rf"^\d{{4}}\s*년\s*{_DATE_MONTH_RE}\s*월"
+        rf"(?:\s*{_DATE_DAY_RE}\s*일)?$"
+    ),
+    # US numeric dates: 3/31/2020, 03-31-2020.
+    re.compile(
+        rf"^{_DATE_MONTH_RE}\s*[-/]\s*{_DATE_DAY_RE}\s*[-/]\s*"
+        r"(?:\d{2}|\d{4})$"
+    ),
+    # US text dates: Mar 31, 2020, March 31 2020.
+    re.compile(
+        r"^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+        r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+        rf"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+{_DATE_DAY_RE},?\s+\d{{4}}$",
+        re.IGNORECASE,
+    ),
+)
+
 
 def _is_empty(value: object) -> bool:
     """Whether a sampled cell counts as empty for density purposes.
@@ -128,6 +172,86 @@ def _is_empty(value: object) -> bool:
     """
 
     return value is None or (isinstance(value, str) and value == "")
+
+
+def _is_time_axis_header_label(value: object) -> bool:
+    """Whether a header cell names a time-axis column (issue #24).
+
+    The match is intentionally token-based for English labels so ``date`` in
+    ``update`` does not trigger the exception. Korean labels are matched by
+    substring because common spreadsheet labels are short compound words.
+    """
+
+    if not isinstance(value, str):
+        return False
+    label = value.strip().lower()
+    if not label:
+        return False
+    tokens = [token for token in re.split(r"[^a-z0-9]+", label) if token]
+    if any(token in _TIME_AXIS_HEADER_TOKENS for token in tokens):
+        return True
+    return any(text in label for text in _TIME_AXIS_HEADER_SUBSTRINGS)
+
+
+def _is_time_axis_value(value: object) -> bool:
+    """Whether a leading cell value looks like a period/date/time key."""
+
+    if _is_empty(value) or isinstance(value, bool):
+        return False
+    if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+        return True
+    if isinstance(value, int):
+        return 1000 <= value <= 9999
+    if isinstance(value, float):
+        return value.is_integer() and 1000 <= value <= 9999
+    if isinstance(value, str):
+        text = value.strip()
+        return any(pattern.match(text) for pattern in _TIME_AXIS_TEXT_PATTERNS)
+    return False
+
+
+def _is_strict_time_axis_text(value: object) -> bool:
+    """Whether text is specific enough to infer a blank-header time axis."""
+
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return any(pattern.match(text) for pattern in _TIME_AXIS_TEXT_PATTERNS)
+
+
+def _is_blank_header_time_axis_value(value: object) -> bool:
+    """Whether a value can prove a blank leading header is a time axis."""
+
+    return isinstance(value, (_dt.datetime, _dt.date, _dt.time)) or (
+        _is_strict_time_axis_text(value)
+    )
+
+
+def _is_sparse_time_axis_data_row(
+    row: list[object],
+    header: list[object],
+    left_col: int,
+) -> bool:
+    """Whether a low-density row is a valid sparse time-series observation.
+
+    BIS-style wide time-series can have old periods where only the Period
+    column is populated because no series has started yet. Those rows are data:
+    they must establish ``data_start_row`` and must not enter ``skip_rows``.
+    """
+
+    first_value = row[left_col - 1] if left_col - 1 < len(row) else None
+    if not _is_time_axis_value(first_value):
+        return False
+    header_value = header[left_col - 1] if left_col - 1 < len(header) else None
+    if _is_time_axis_header_label(header_value):
+        return True
+    # Blank top-left headers are common in time-series exports whose first
+    # column is a date key (issue #16). Allow real date/time values and strict
+    # Korean/US text date strings, but keep bare years/numeric labels out so a
+    # blank header alone does not turn section markers into data.
+    return _is_empty(header_value) and _is_blank_header_time_axis_value(
+        first_value
+    )
 
 
 def _leading_label_raw(row: list[object], left_col: int = 1) -> str | None:
@@ -471,6 +595,8 @@ def _value_kind(value: object) -> str | None:
     if isinstance(value, (int, float)):
         return "number"
     if isinstance(value, str):
+        if _is_time_axis_value(value):
+            return "date"
         return "text"
     return "other"
 
@@ -810,8 +936,14 @@ class BoundaryDetector(Analyzer):
                 density < LOW_DENSITY_THRESHOLD
                 or (non_empty == 1 and table_width >= 3)
             )
+            is_sparse_time_axis_data = (
+                is_low_density
+                and _is_sparse_time_axis_data_row(
+                    row, header_values, left_col
+                )
+            )
 
-            if is_keyword or is_low_density:
+            if is_keyword or (is_low_density and not is_sparse_time_axis_data):
                 skip_rows.append(one_based)
                 # Record the excluded row's label (original case) for the
                 # aggregator's no-silent-loss note (issue #2). A low-density row
@@ -928,7 +1060,15 @@ class BoundaryDetector(Analyzer):
             context, profile, header_row, end_row
         ):
             _, non_empty = _span_density(row, left_col, right_col)
-            if non_empty == 0:
+            candidate_values = [
+                row[col - 1] if col - 1 < len(row) else None
+                for col in candidate_cols
+            ]
+            has_candidate_time_axis = any(
+                _is_blank_header_time_axis_value(value)
+                for value in candidate_values
+            )
+            if non_empty == 0 and not has_candidate_time_axis:
                 blank_run += 1
                 if blank_run >= BLANK_RUN:
                     break
@@ -936,8 +1076,7 @@ class BoundaryDetector(Analyzer):
             blank_run = 0
 
             observed += 1
-            for col in candidate_cols:
-                value = row[col - 1] if col - 1 < len(row) else None
+            for col, value in zip(candidate_cols, candidate_values):
                 stats[col].add(value)
             if observed >= TYPE_SAMPLE_ROWS:
                 break

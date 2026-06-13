@@ -30,6 +30,7 @@ from excel_inspector import (
 from excel_inspector.analyzers.boundary_detector import (
     BoundaryDetector,
     _header_column_span,
+    _is_time_axis_value,
     _leading_label,
     _matches_keyword,
     _span_density,
@@ -434,6 +435,76 @@ def test_isolated_low_density_row_is_skipped() -> None:
     assert profile.data_start_row == 2
     assert profile.data_end_row == 4
     assert profile.skip_rows == [3]
+
+
+def test_isolated_sparse_time_axis_rows_are_data() -> None:
+    """Issue #24: date-axis sparse observations are data, not separators.
+
+    Wide time-series often begin before most series have observations. Rows
+    with only the Period column populated are valid observations and must set
+    ``data_start_row`` instead of accumulating in ``skip_rows``.
+    """
+
+    rows = [
+        ["Period", "A", "B", "C", "D"],  # row 1 header
+        [_dt.datetime(2020, 3, 31), None, None, None, None],
+        [_dt.datetime(2020, 6, 30), None, None, None, None],
+        [_dt.datetime(2020, 9, 30), 1.0, None, None, None],
+        [_dt.datetime(2020, 12, 31), 2.0, 3.0, 4.0, 5.0],
+    ]
+    profile = make_sheet_profile(
+        name="S", header_row=1, max_row=len(rows), max_col=5
+    )
+    ctx = make_context(sheets=[profile], loader=_FakeLoader({"S": rows}))
+
+    BoundaryDetector().analyze(ctx)
+    assert profile.data_start_row == 2
+    assert profile.data_end_row == 5
+    assert profile.skip_rows == []
+
+
+def test_time_axis_text_patterns_are_korean_or_us_dates_only() -> None:
+    """Issue #24: regex text dates are limited to Korean/US-style dates."""
+
+    accepted = [
+        "2020-03-31",
+        "2020.3.31",
+        "2020년 3월 31일",
+        "3/31/2020",
+        "03-31-2020",
+        "Mar 31, 2020",
+        "March 31 2020",
+    ]
+    rejected = [
+        "2020-Q1",
+        "Q1 2020",
+        "2020",
+        "31/03/2020",
+    ]
+
+    assert all(_is_time_axis_value(value) for value in accepted)
+    assert not any(_is_time_axis_value(value) for value in rejected)
+
+
+def test_isolated_sparse_text_date_axis_rows_are_data() -> None:
+    """Issue #24: text dates in blank-leading-header sheets are preserved."""
+
+    rows = [
+        [None, "A", "B", "C"],  # row 1 header; A is the implicit date axis
+        ["2020-03-31", None, None, None],
+        ["2020년 6월 30일", None, None, None],
+        ["3/31/2021", None, None, None],
+        ["March 31, 2022", 1.0, 2.0, 3.0],
+    ]
+    profile = make_sheet_profile(
+        name="S", header_row=1, max_row=len(rows), max_col=4
+    )
+    ctx = make_context(sheets=[profile], loader=_FakeLoader({"S": rows}))
+
+    BoundaryDetector().analyze(ctx)
+    assert profile.data_start_row == 2
+    assert profile.data_end_row == 5
+    assert profile.skip_rows == []
 
 
 def test_isolated_two_column_keyvalue_rows_preserved() -> None:
